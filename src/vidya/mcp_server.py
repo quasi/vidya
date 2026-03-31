@@ -20,6 +20,11 @@ from vidya.store import (
 from vidya.query import cascade_query
 from vidya.learn import extract_from_feedback
 from vidya.maintain import compute_stats
+from vidya.guidance import (
+    for_start_task, for_end_task, for_record_step,
+    for_query, for_feedback, for_explain, for_stats,
+)
+from vidya.brief import assemble_brief
 
 
 _DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
@@ -139,6 +144,21 @@ async def list_tools() -> list[types.Tool]:
                 },
             },
         ),
+        types.Tool(
+            name="vidya_brief",
+            description=(
+                "Get a structured context dump for the current scope. "
+                "Returns project state, items needing attention, and input quality hints. "
+                "Call at session start or when you need situational awareness."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string"},
+                    "project": {"type": "string"},
+                },
+            },
+        ),
     ]
 
 
@@ -165,21 +185,23 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             framework=arguments.get("framework"),
             project=arguments.get("project"),
         )
-        payload = {
-            "task_id": task_id,
-            "knowledge": [
-                {
-                    "id": r.id,
-                    "pattern": r.pattern,
-                    "guidance": r.guidance,
-                    "type": r.type,
-                    "effective_confidence": round(r.effective_confidence, 3),
-                    "scope_level": r.scope_level,
-                    "match_reason": r.match_reason,
-                }
-                for r in results
-            ],
-        }
+        knowledge = [
+            {
+                "id": r.id,
+                "pattern": r.pattern,
+                "guidance": r.guidance,
+                "type": r.type,
+                "effective_confidence": round(r.effective_confidence, 3),
+                "scope_level": r.scope_level,
+                "match_reason": r.match_reason,
+                "fire_count": 0,  # not available from QueryResult
+            }
+            for r in results
+        ]
+        payload = {"task_id": task_id, "knowledge": knowledge}
+        payload["_guidance"] = for_start_task(
+            knowledge=knowledge, project=arguments.get("project"), db=db,
+        )
 
     elif name == "vidya_end_task":
         end_task(
@@ -190,6 +212,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             failure_type=arguments.get("failure_type"),
         )
         payload = {"ok": True}
+        payload["_guidance"] = for_end_task(
+            outcome=arguments["outcome"], task_id=arguments["task_id"], db=db,
+        )
 
     elif name == "vidya_record_step":
         import json as _json
@@ -207,15 +232,16 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         matched = cascade_query(
             db,
             context=arguments["action"],
-            language="unknown",  # step doesn't carry language — caller should use vidya_query
+            language="unknown",
         )
-        payload = {
-            "step_id": step_id,
-            "matched_items": [
-                {"id": r.id, "pattern": r.pattern, "guidance": r.guidance}
-                for r in matched
-            ],
-        }
+        matched_items = [
+            {"id": r.id, "pattern": r.pattern, "guidance": r.guidance}
+            for r in matched
+        ]
+        payload = {"step_id": step_id, "matched_items": matched_items}
+        payload["_guidance"] = for_record_step(
+            outcome=arguments["outcome"], matched_items=matched_items, db=db,
+        )
 
     elif name == "vidya_query":
         results = cascade_query(
@@ -228,20 +254,22 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             goal=arguments.get("goal"),
             min_confidence=arguments.get("min_confidence", 0.2),
         )
-        payload = {
-            "items": [
-                {
-                    "id": r.id,
-                    "pattern": r.pattern,
-                    "guidance": r.guidance,
-                    "type": r.type,
-                    "effective_confidence": round(r.effective_confidence, 3),
-                    "scope_level": r.scope_level,
-                    "match_reason": r.match_reason,
-                }
-                for r in results
-            ]
-        }
+        items = [
+            {
+                "id": r.id,
+                "pattern": r.pattern,
+                "guidance": r.guidance,
+                "type": r.type,
+                "effective_confidence": round(r.effective_confidence, 3),
+                "scope_level": r.scope_level,
+                "match_reason": r.match_reason,
+            }
+            for r in results
+        ]
+        payload = {"items": items}
+        payload["_guidance"] = for_query(
+            items=items, context=arguments["context"], db=db,
+        )
 
     elif name == "vidya_feedback":
         feedback_id = create_feedback(
@@ -260,18 +288,21 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         ).fetchone()
         result = extract_from_feedback(db, dict(feedback_row))
         payload = {"feedback_id": feedback_id, "learning": result}
+        payload["_guidance"] = for_feedback(
+            feedback_type=arguments["feedback_type"], learning=result, db=db,
+        )
 
     elif name == "vidya_explain":
         item = get_item(db, arguments["item_id"])
-        # Fetch any items that override this one
         overridden_by = db.execute(
             "SELECT id, pattern, guidance FROM knowledge_items WHERE overrides = ? AND status = 'active'",
             (arguments["item_id"],),
         ).fetchall()
-        payload = {
-            "item": item,
-            "overridden_by": [dict(r) for r in overridden_by],
-        }
+        overridden_list = [dict(r) for r in overridden_by]
+        payload = {"item": item, "overridden_by": overridden_list}
+        payload["_guidance"] = for_explain(
+            item=item, overridden_by=overridden_list, db=db,
+        )
 
     elif name == "vidya_stats":
         stats = compute_stats(
@@ -279,7 +310,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             language=arguments.get("language"),
             project=arguments.get("project"),
         )
-        payload = {
+        stats_payload = {
             "total_items": stats.total_items,
             "by_confidence": stats.by_confidence,
             "by_type": stats.by_type,
@@ -288,6 +319,15 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             "total_feedback": stats.total_feedback,
             "total_candidates": stats.total_candidates,
         }
+        payload = stats_payload
+        payload["_guidance"] = for_stats(stats=stats_payload, db=db)
+
+    elif name == "vidya_brief":
+        payload = assemble_brief(
+            db,
+            language=arguments.get("language"),
+            project=arguments.get("project"),
+        )
 
     else:
         payload = {"error": f"Unknown tool: {name}"}
