@@ -224,6 +224,30 @@ def test_framework_item_without_language_not_returned_without_framework_query(db
     assert len(result_ids) == 0
 
 
+# --- Query without language (framework-only) ---
+
+def test_query_with_framework_only_no_language(db):
+    """Querying with only framework (no language) finds framework-scoped items."""
+    tool_id = create_item(
+        db, pattern="scenario cluster", guidance="Always set --cluster on scenarios",
+        item_type="convention", framework="canon", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="scenario cluster", framework="canon")
+    result_ids = [r.id for r in results]
+    assert tool_id in result_ids
+
+
+def test_query_without_language_finds_global_items(db):
+    """Querying without language still finds global items."""
+    global_id = create_item(
+        db, pattern="error handling", guidance="Handle errors properly",
+        item_type="convention", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="error handling")
+    result_ids = [r.id for r in results]
+    assert global_id in result_ids
+
+
 # --- FTS5 sanitization ---
 
 def test_sanitize_fts_tokens_quotes_words():

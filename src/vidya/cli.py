@@ -26,7 +26,7 @@ def main():
 
 
 @main.command()
-@click.option("--language", required=True)
+@click.option("--language", default=None)
 @click.option("--context", required=True)
 @click.option("--runtime", default=None)
 @click.option("--framework", default=None)

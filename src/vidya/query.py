@@ -56,7 +56,7 @@ class QueryResult:
 def cascade_query(
     db: sqlite3.Connection,
     context: str,
-    language: str,
+    language: str | None = None,
     runtime: str | None = None,
     framework: str | None = None,
     project: str | None = None,
@@ -140,7 +140,7 @@ def cascade_query(
 
 def _fetch_in_scope(
     db: sqlite3.Connection,
-    language: str,
+    language: str | None,
     runtime: str | None,
     framework: str | None,
     project: str | None,
@@ -156,27 +156,33 @@ def _fetch_in_scope(
     params = []
     scope_clauses = ["(language IS NULL AND runtime IS NULL AND framework IS NULL AND project IS NULL)"]
 
-    scope_clauses.append("(language = ? AND runtime IS NULL AND framework IS NULL AND project IS NULL)")
-    params.append(language)
+    if language:
+        scope_clauses.append("(language = ? AND runtime IS NULL AND framework IS NULL AND project IS NULL)")
+        params.append(language)
 
-    if runtime:
-        scope_clauses.append("(language = ? AND runtime = ? AND framework IS NULL AND project IS NULL)")
-        params.extend([language, runtime])
+        if runtime:
+            scope_clauses.append("(language = ? AND runtime = ? AND framework IS NULL AND project IS NULL)")
+            params.extend([language, runtime])
 
     if framework:
         # Language-independent tool knowledge (e.g. framework=canon with language=NULL)
         scope_clauses.append("(language IS NULL AND runtime IS NULL AND framework = ? AND project IS NULL)")
         params.append(framework)
-        # Language-specific framework knowledge
-        scope_clauses.append("(language = ? AND runtime IS NULL AND framework = ? AND project IS NULL)")
-        params.extend([language, framework])
-        if runtime:
-            scope_clauses.append("(language = ? AND runtime = ? AND framework = ? AND project IS NULL)")
-            params.extend([language, runtime, framework])
+        if language:
+            # Language-specific framework knowledge
+            scope_clauses.append("(language = ? AND runtime IS NULL AND framework = ? AND project IS NULL)")
+            params.extend([language, framework])
+            if runtime:
+                scope_clauses.append("(language = ? AND runtime = ? AND framework = ? AND project IS NULL)")
+                params.extend([language, runtime, framework])
 
     if project:
-        scope_clauses.append("(language = ? AND project = ?)")
-        params.extend([language, project])
+        if language:
+            scope_clauses.append("(language = ? AND project = ?)")
+            params.extend([language, project])
+        # Language-independent project knowledge
+        scope_clauses.append("(language IS NULL AND project = ?)")
+        params.append(project)
 
     where = " OR ".join(scope_clauses)
     sql = f"SELECT * FROM knowledge_items WHERE status = 'active' AND ({where})"

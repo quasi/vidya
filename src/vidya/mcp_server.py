@@ -59,7 +59,7 @@ async def list_tools() -> list[types.Tool]:
                     "framework": {"type": "string"},
                     "project": {"type": "string"},
                 },
-                "required": ["goal", "language"],
+                "required": ["goal"],
             },
         ),
         types.Tool(
@@ -106,7 +106,7 @@ async def list_tools() -> list[types.Tool]:
                     "goal": {"type": "string"},
                     "min_confidence": {"type": "number", "default": 0.2},
                 },
-                "required": ["context", "language"],
+                "required": ["context"],
             },
         ),
         types.Tool(
@@ -177,7 +177,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         task_id = create_task(
             db,
             goal=arguments["goal"],
-            language=arguments["language"],
+            language=arguments.get("language"),
             goal_type=arguments.get("goal_type"),
             runtime=arguments.get("runtime"),
             framework=arguments.get("framework"),
@@ -186,7 +186,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         results = cascade_query(
             db,
             context=arguments["goal"],
-            language=arguments["language"],
+            language=arguments.get("language"),
             runtime=arguments.get("runtime"),
             framework=arguments.get("framework"),
             project=arguments.get("project"),
@@ -256,7 +256,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         results = cascade_query(
             db,
             context=arguments["context"],
-            language=arguments["language"],
+            language=arguments.get("language"),
             runtime=arguments.get("runtime"),
             framework=arguments.get("framework"),
             project=arguments.get("project"),

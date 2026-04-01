@@ -58,7 +58,7 @@ _ITEM_WRITABLE_COLUMNS: frozenset[str] = frozenset({
 def create_task(
     db: sqlite3.Connection,
     goal: str,
-    language: str,
+    language: str | None = None,
     goal_type: str | None = None,
     runtime: str | None = None,
     framework: str | None = None,
