@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 
 from vidya.store import create_item, update_item
-from vidya.maintain import compute_stats, find_stale_items
+from vidya.maintain import compute_stats, find_stale_items, health_report
 
 
 def test_find_stale_items_returns_empty_for_fresh_items(db):
@@ -67,3 +67,32 @@ def test_find_stale_items_skips_archived(db):
     update_item(db, item_id, status="archived")
     stale = find_stale_items(db)
     assert stale == []
+
+
+def test_health_report_empty_db(db):
+    report = health_report(db)
+    assert report["total_items"] == 0
+    assert report["stale_count"] == 0
+    assert report["health"] == "empty"
+
+
+def test_health_report_healthy_db(db):
+    for i in range(5):
+        create_item(db, pattern=f"rule {i}", guidance=f"do {i}",
+                    item_type="convention", base_confidence=0.6, source="seed")
+    report = health_report(db)
+    assert report["total_items"] == 5
+    assert report["stale_count"] == 0
+    assert report["health"] == "healthy"
+
+
+def test_health_report_degraded_when_many_stale(db):
+    """More than 50% stale items → degraded."""
+    for i in range(3):
+        create_item(db, pattern=f"weak {i}", guidance=f"X {i}",
+                    item_type="convention", base_confidence=0.05, source="extraction")
+    create_item(db, pattern="strong", guidance="Y",
+                item_type="convention", base_confidence=0.8, source="seed")
+    report = health_report(db)
+    assert report["health"] == "degraded"
+    assert report["stale_count"] == 3

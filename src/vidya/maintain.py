@@ -159,3 +159,31 @@ def find_stale_items(
 
     stale.sort(key=lambda x: x["effective_confidence"])
     return stale
+
+
+def health_report(
+    db: sqlite3.Connection,
+    language: str | None = None,
+    project: str | None = None,
+) -> dict[str, Any]:
+    """Compute a health report for the knowledge base."""
+    stats = compute_stats(db, language=language, project=project)
+    stale = find_stale_items(db, language=language, project=project)
+
+    if stats.total_items == 0:
+        health = "empty"
+    elif len(stale) > stats.total_items * 0.5:
+        health = "degraded"
+    else:
+        health = "healthy"
+
+    return {
+        "total_items": stats.total_items,
+        "by_confidence": stats.by_confidence,
+        "by_type": stats.by_type,
+        "total_tasks": stats.total_tasks,
+        "total_feedback": stats.total_feedback,
+        "stale_count": len(stale),
+        "stale_items": stale,
+        "health": health,
+    }
