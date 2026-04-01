@@ -123,6 +123,7 @@ def _apply_confidence_update(
 ) -> None:
     """Find similar items and apply a confidence update function to each."""
     similar = find_similar_items(db, detail, language, project)
+    updated = False
     for item in similar:
         if overlap_score(detail, item) > 0.3:
             item_dict = dict(item)
@@ -130,11 +131,15 @@ def _apply_confidence_update(
             update_item(
                 db,
                 item["id"],
+                _commit=False,
                 base_confidence=item_dict["base_confidence"],
                 last_fired=item_dict["last_fired"],
                 fire_count=item_dict["fire_count"],
                 **{count_field: item_dict[count_field]},
             )
+            updated = True
+    if updated:
+        db.commit()
 
 
 def _handle_negative(

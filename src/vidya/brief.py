@@ -17,19 +17,20 @@ def assemble_brief(
     project: str | None = None,
 ) -> dict[str, Any]:
     """Assemble a structured brief for the calling agent."""
+    rows = _fetch_scoped_items(db, language, project)
     return {
-        "project_state": _project_state(db, language, project),
-        "attention_items": _attention_items(db, language, project),
+        "project_state": _project_state(db, language, project, rows),
+        "attention_items": _attention_items(rows),
         "input_quality_hints": _input_quality_hints(),
     }
 
 
-def _project_state(
+def _fetch_scoped_items(
     db: sqlite3.Connection,
     language: str | None,
     project: str | None,
-) -> dict[str, Any]:
-    """Counts and distributions for the current scope."""
+) -> list:
+    """Fetch active knowledge items for the given scope (shared by state and attention)."""
     conditions = ["status = 'active'"]
     params: list[Any] = []
     if language:
@@ -39,14 +40,22 @@ def _project_state(
         conditions.append("project = ?")
         params.append(project)
     where = " AND ".join(conditions)
-
-    now = datetime.now(timezone.utc)
-
-    rows = db.execute(
-        f"SELECT base_confidence, last_fired, first_seen, type, fire_count, fail_count "
+    return db.execute(
+        f"SELECT id, pattern, guidance, base_confidence, last_fired, first_seen, "
+        f"type, fire_count, fail_count, success_count "
         f"FROM knowledge_items WHERE {where}",
         params,
     ).fetchall()
+
+
+def _project_state(
+    db: sqlite3.Connection,
+    language: str | None,
+    project: str | None,
+    rows: list,
+) -> dict[str, Any]:
+    """Counts and distributions for the current scope."""
+    now = datetime.now(timezone.utc)
 
     high = medium = low = 0
     by_type: dict[str, int] = {}
@@ -109,29 +118,8 @@ def _project_state(
     }
 
 
-def _attention_items(
-    db: sqlite3.Connection,
-    language: str | None,
-    project: str | None,
-) -> list[dict[str, str]]:
+def _attention_items(rows: list) -> list[dict[str, str]]:
     """Items that need attention: never fired, high failure rate, very stale."""
-    conditions = ["status = 'active'"]
-    params: list[Any] = []
-    if language:
-        conditions.append("language = ?")
-        params.append(language)
-    if project:
-        conditions.append("project = ?")
-        params.append(project)
-    where = " AND ".join(conditions)
-
-    rows = db.execute(
-        f"SELECT id, pattern, guidance, fire_count, fail_count, success_count, "
-        f"last_fired, first_seen, base_confidence "
-        f"FROM knowledge_items WHERE {where}",
-        params,
-    ).fetchall()
-
     attention: list[dict[str, str]] = []
     now = datetime.now(timezone.utc)
 

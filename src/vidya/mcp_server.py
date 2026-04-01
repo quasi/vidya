@@ -3,6 +3,7 @@
 Each tool maps to 1-3 library calls. No business logic here.
 """
 
+import json
 from pathlib import Path
 
 import mcp.server.stdio
@@ -170,7 +171,6 @@ async def list_tools() -> list[types.Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    import json
     db = _get_db()
 
     if name == "vidya_start_task":

@@ -259,7 +259,7 @@ def get_item(db: sqlite3.Connection, item_id: str) -> dict[str, Any]:
     return dict(row)
 
 
-def update_item(db: sqlite3.Connection, item_id: str, **fields: Any) -> None:
+def update_item(db: sqlite3.Connection, item_id: str, _commit: bool = True, **fields: Any) -> None:
     if not fields:
         return
     invalid = set(fields) - _ITEM_WRITABLE_COLUMNS
@@ -272,7 +272,8 @@ def update_item(db: sqlite3.Connection, item_id: str, **fields: Any) -> None:
     )
     if cursor.rowcount == 0:
         raise KeyError(f"Knowledge item not found: {item_id}")
-    db.commit()
+    if _commit:
+        db.commit()
 
 
 # --- extraction_candidates ---

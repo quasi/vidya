@@ -1,11 +1,7 @@
 """Tests for schema.py and store.py — create/read/update cycle for each table."""
 
-import os
-import tempfile
-
 import pytest
 
-from vidya.schema import init_db
 from vidya.store import (
     archive_item,
     create_candidate,
@@ -18,16 +14,6 @@ from vidya.store import (
     promote_candidate,
     update_item,
 )
-
-
-@pytest.fixture
-def db():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    conn = init_db(path)
-    yield conn
-    conn.close()
-    os.unlink(path)
 
 
 # --- task_records ---

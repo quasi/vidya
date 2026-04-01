@@ -1,23 +1,9 @@
 """Tests for learn.py — feedback-driven extraction engine."""
 
-import os
-import tempfile
-
 import pytest
 
-from vidya.schema import init_db
 from vidya.store import create_item, create_feedback, get_item
 from vidya.learn import extract_from_feedback
-
-
-@pytest.fixture
-def db():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    conn = init_db(path)
-    yield conn
-    conn.close()
-    os.unlink(path)
 
 
 def _feedback(db, feedback_type: str, detail: str, language: str = "python", **kwargs):

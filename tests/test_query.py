@@ -1,23 +1,9 @@
 """Tests for query.py — cascade query with scope resolution and FTS5 ranking."""
 
-import os
-import tempfile
-
 import pytest
 
-from vidya.schema import init_db
 from vidya.store import create_item
 from vidya.query import cascade_query, QueryResult, _sanitize_fts_tokens
-
-
-@pytest.fixture
-def db():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    conn = init_db(path)
-    yield conn
-    conn.close()
-    os.unlink(path)
 
 
 # --- Test 1: scope specificity — project beats language beats global ---

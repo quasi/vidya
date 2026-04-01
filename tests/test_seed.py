@@ -1,23 +1,9 @@
 """Tests for seed.py — import knowledge from markdown files."""
 
-import os
-import tempfile
-
 import pytest
 
-from vidya.schema import init_db
 from vidya.seed import seed_from_file
 from vidya.query import cascade_query
-
-
-@pytest.fixture
-def db():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    conn = init_db(path)
-    yield conn
-    conn.close()
-    os.unlink(path)
 
 
 @pytest.fixture

@@ -1,23 +1,9 @@
 """Tests for guidance.py — contextual guidance generation for MCP responses."""
 
-import os
-import tempfile
-
 import pytest
 
-from vidya.schema import init_db
 from vidya.store import create_item, create_task, end_task, create_feedback
 from vidya.learn import extract_from_feedback
-
-
-@pytest.fixture
-def db():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    conn = init_db(path)
-    yield conn
-    conn.close()
-    os.unlink(path)
 
 
 # --- for_start_task ---
