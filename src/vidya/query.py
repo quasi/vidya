@@ -4,7 +4,20 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from vidya.confidence import compute_freshness, effective_confidence
+from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
+
+
+def _sanitize_fts_tokens(text: str) -> str:
+    """Quote each token to prevent FTS5 operator interpretation.
+
+    FTS5 treats AND, OR, NOT, *, ^, etc. as operators.
+    Double-quoting each token forces literal matching.
+    """
+    tokens = text.split()
+    if not tokens:
+        return ""
+    quoted = ['"' + t.replace('"', '""') + '"' for t in tokens]
+    return " OR ".join(quoted)
 
 
 # Scope specificity boost: narrower scope → higher score
@@ -27,16 +40,6 @@ def _scope_level(row: dict) -> str:
     if row["language"]:
         return "language"
     return "global"
-
-
-def _days_since(iso_ts: str | None, now: datetime) -> int | None:
-    if iso_ts is None:
-        return None
-    last = datetime.fromisoformat(iso_ts)
-    # Defensive: handle legacy rows without tz offset
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    return max(0, (now - last).days)
 
 
 @dataclass
@@ -79,10 +82,7 @@ def cascade_query(
     # Step 2 + 3: compute effective_confidence, filter
     candidates = []
     for row in rows:
-        # Use last_fired if available; fall back to first_seen so newly created
-        # items are treated as fresh rather than stale (last_fired=NULL).
-        ref_ts = row["last_fired"] or row["first_seen"]
-        days = _days_since(ref_ts, now)
+        days = days_since_reference(row["last_fired"], row["first_seen"], now)
         fresh = compute_freshness(days)
         eff = effective_confidence(row["base_confidence"], fresh)
         if eff < min_confidence:
@@ -190,12 +190,12 @@ def _fts_scores(
     # Tokenize context + goal into individual words, joined with OR for partial matching.
     # FTS5 AND logic ("error handling" requires both) is too strict;
     # OR gives partial semantic overlap.
-    tokens = context.split()
+    combined = context
     if goal:
-        tokens.extend(goal.split())
-    if not tokens:
+        combined += " " + goal
+    fts_query = _sanitize_fts_tokens(combined)
+    if not fts_query:
         return {}
-    fts_query = " OR ".join(tokens)
 
     try:
         rows = db.execute(

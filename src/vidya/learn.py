@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any
 
 from vidya.confidence import update_on_success, update_on_failure
+from vidya.query import _sanitize_fts_tokens
 from vidya.store import create_item, create_candidate, promote_candidate, update_item
 
 # Feedback types that trigger learning
@@ -51,6 +52,8 @@ def extract_from_feedback(
     if fb_type in _FAILURE_TYPES:
         _apply_confidence_update(db, detail, language, project, update_on_failure, "fail_count")
         return None
+    # test_passed is recorded in feedback_records but does NOT update knowledge items.
+    # Passing tests are expected, not evidence of correctness.
     return None
 
 
@@ -75,10 +78,9 @@ def find_similar_items(
     project: str | None,
 ) -> list[dict[str, Any]]:
     """Return active items that overlap with this text via FTS5."""
-    tokens = detail.split()
-    if not tokens:
+    fts_query = _sanitize_fts_tokens(detail)
+    if not fts_query:
         return []
-    fts_query = " OR ".join(tokens)
     try:
         rows = db.execute(
             """
@@ -186,7 +188,7 @@ def _handle_negative(
 def _infer_pattern(detail: str, language: str | None, project: str | None) -> str:
     """Derive a pattern string from the feedback detail (Phase 1 heuristic)."""
     words = [w for w in detail.lower().split()
-             if w not in ("always", "never", "don't", "avoid", "must", "should", "use")]
+             if w not in ("a", "an", "the", "to", "in", "on", "at", "for", "of", "with")]
     topic = " ".join(words[:8]).rstrip(".,;:")
     if project:
         return f"{topic} in {project}"

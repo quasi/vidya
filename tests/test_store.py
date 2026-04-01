@@ -289,3 +289,21 @@ def test_wal_mode_enabled(db):
 def test_foreign_keys_enabled(db):
     row = db.execute("PRAGMA foreign_keys").fetchone()
     assert row[0] == 1
+
+
+# --- Enum validation ---
+
+def test_end_task_rejects_invalid_outcome(db):
+    task_id = create_task(db, goal="Test", language="python")
+    with pytest.raises(ValueError, match="Invalid outcome"):
+        end_task(db, task_id, outcome="bogus")
+
+
+def test_create_feedback_rejects_invalid_type(db):
+    with pytest.raises(ValueError, match="Invalid feedback_type"):
+        create_feedback(db, feedback_type="bogus", detail="test")
+
+
+def test_create_item_rejects_invalid_type(db):
+    with pytest.raises(ValueError, match="Invalid item_type"):
+        create_item(db, pattern="X", guidance="Y", item_type="bogus")

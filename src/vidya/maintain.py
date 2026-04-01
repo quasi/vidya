@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from vidya.confidence import compute_freshness, effective_confidence, FRESHNESS_FLOOR
+from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
 
 
 @dataclass
@@ -53,14 +53,7 @@ def compute_stats(
     stats.total_items = len(rows)
 
     for row in rows:
-        ref_ts = row["last_fired"] or row["first_seen"]
-        if ref_ts:
-            last = datetime.fromisoformat(ref_ts)
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-            days = max(0, (now - last).days)
-        else:
-            days = None
+        days = days_since_reference(row["last_fired"], row["first_seen"], now)
         fresh = compute_freshness(days)
         eff = effective_confidence(row["base_confidence"], fresh)
 

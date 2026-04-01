@@ -56,16 +56,24 @@ def for_end_task(
     db: sqlite3.Connection,
 ) -> dict[str, str]:
     """Guidance after vidya_end_task."""
-    # Tier 2: check recent failure pattern
-    recent_failures = db.execute(
-        "SELECT COUNT(*) FROM task_records WHERE outcome = 'failure' "
-        "ORDER BY timestamp_end DESC LIMIT 5"
-    ).fetchone()[0]
+    # Tier 2: check recent failure pattern in the same scope
+    task = db.execute(
+        "SELECT language, project FROM task_records WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task:
+        recent = db.execute(
+            "SELECT outcome FROM task_records WHERE language IS ? AND project IS ? "
+            "ORDER BY timestamp_start DESC LIMIT 5",
+            (task["language"], task["project"]),
+        ).fetchall()
+        recent_failures = sum(1 for r in recent if r["outcome"] == "failure")
+    else:
+        recent_failures = 0
 
     if outcome == "failure":
         note = "Task ended in failure."
         if recent_failures >= 3:
-            note += f" {recent_failures} recent tasks have failed — review knowledge items for this scope."
+            note += f" {recent_failures} of the last 5 tasks in this scope failed — review knowledge items."
         return {
             "note": note,
             "next_step": "Record what went wrong with vidya_feedback(type=user_correction) so Vidya learns from this failure.",

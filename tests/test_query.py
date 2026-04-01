@@ -7,7 +7,7 @@ import pytest
 
 from vidya.schema import init_db
 from vidya.store import create_item
-from vidya.query import cascade_query, QueryResult
+from vidya.query import cascade_query, QueryResult, _sanitize_fts_tokens
 
 
 @pytest.fixture
@@ -175,3 +175,35 @@ def test_different_language_not_returned(db):
                 "SELECT id FROM knowledge_items WHERE language = 'common-lisp'"
             ).fetchall()
         ]
+
+
+# --- FTS5 sanitization ---
+
+def test_sanitize_fts_tokens_quotes_words():
+    assert _sanitize_fts_tokens("error handling") == '"error" OR "handling"'
+
+
+def test_sanitize_fts_tokens_neutralizes_operators():
+    result = _sanitize_fts_tokens("NOT error AND handling")
+    assert '"NOT"' in result
+    assert '"AND"' in result
+
+
+def test_sanitize_fts_tokens_escapes_internal_quotes():
+    result = _sanitize_fts_tokens('say "hello"')
+    assert '""hello""' in result
+
+
+def test_sanitize_fts_tokens_empty():
+    assert _sanitize_fts_tokens("") == ""
+
+
+def test_fts_special_chars_do_not_crash(db):
+    """Query with FTS operator characters should not raise."""
+    create_item(db, pattern="error handling", guidance="Handle errors properly",
+                item_type="convention", language="python", base_confidence=0.8)
+    # These contain FTS5 operators — should not crash
+    results = cascade_query(db, context="NOT error", language="python")
+    assert isinstance(results, list)
+    results = cascade_query(db, context="error AND handling OR *", language="python")
+    assert isinstance(results, list)

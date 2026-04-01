@@ -16,6 +16,7 @@ from vidya.store import (
     create_step,
     create_feedback,
     get_item,
+    get_task,
 )
 from vidya.query import cascade_query
 from vidya.learn import extract_from_feedback
@@ -31,9 +32,14 @@ _DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
 
 app = Server("vidya")
 
+_db_conn = None
+
 
 def _get_db():
-    return init_db(_DB_PATH)
+    global _db_conn
+    if _db_conn is None:
+        _db_conn = init_db(_DB_PATH)
+    return _db_conn
 
 
 @app.list_tools()
@@ -217,7 +223,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         )
 
     elif name == "vidya_record_step":
-        import json as _json
         alts = arguments.get("alternatives")
         step_id = create_step(
             db,
@@ -227,12 +232,16 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result_status=arguments["outcome"],
             result_output=arguments["result"],
             thought=arguments.get("rationale"),
-            alternatives=_json.dumps(alts) if alts else None,
+            alternatives=json.dumps(alts) if alts else None,
         )
+        task = get_task(db, arguments["task_id"])
         matched = cascade_query(
             db,
             context=arguments["action"],
-            language="unknown",
+            language=task["language"],
+            runtime=task.get("runtime"),
+            framework=task.get("framework"),
+            project=task.get("project"),
         )
         matched_items = [
             {"id": r.id, "pattern": r.pattern, "guidance": r.guidance}

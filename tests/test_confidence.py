@@ -96,35 +96,35 @@ def test_failure_updates_last_fired():
 # --- Path 3: freshness decay over time ---
 
 def test_freshness_is_1_for_0_days():
-    assert compute_freshness(days_since_fired=0) == pytest.approx(1.0)
+    assert compute_freshness(days_since_reference=0) == pytest.approx(1.0)
 
 
 def test_freshness_decay_after_30_days():
-    f = compute_freshness(days_since_fired=30)
+    f = compute_freshness(days_since_reference=30)
     expected = max(FRESHNESS_FLOOR, 1.0 - FRESHNESS_DECAY_RATE * 30)
     assert f == pytest.approx(expected)
 
 
 def test_freshness_decay_after_90_days():
-    f = compute_freshness(days_since_fired=90)
+    f = compute_freshness(days_since_reference=90)
     expected = max(FRESHNESS_FLOOR, 1.0 - FRESHNESS_DECAY_RATE * 90)
     assert f == pytest.approx(expected)
 
 
 def test_freshness_floor_at_140_days():
     """140 days = 0.005 * 140 = 0.7 decay → 1.0 - 0.7 = 0.3 = FRESHNESS_FLOOR."""
-    f = compute_freshness(days_since_fired=140)
+    f = compute_freshness(days_since_reference=140)
     assert f == pytest.approx(FRESHNESS_FLOOR)
 
 
 def test_freshness_stays_at_floor_beyond_140_days():
-    f200 = compute_freshness(days_since_fired=200)
+    f200 = compute_freshness(days_since_reference=200)
     assert f200 == pytest.approx(FRESHNESS_FLOOR)
 
 
 def test_freshness_none_returns_floor():
     """Item never fired: freshness = FRESHNESS_FLOOR."""
-    assert compute_freshness(days_since_fired=None) == pytest.approx(FRESHNESS_FLOOR)
+    assert compute_freshness(days_since_reference=None) == pytest.approx(FRESHNESS_FLOOR)
 
 
 # --- effective_confidence ---

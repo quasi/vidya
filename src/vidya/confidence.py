@@ -47,14 +47,38 @@ def update_on_failure(item: dict[str, Any]) -> None:
     item["fail_count"] = item.get("fail_count", 0) + 1
 
 
-def compute_freshness(days_since_fired: int | None) -> float:
-    """Compute freshness from days elapsed since last firing.
+def compute_freshness(days_since_reference: int | None) -> float:
+    """Compute freshness from days elapsed since a reference timestamp.
 
-    None means the item has never fired — return FRESHNESS_FLOOR.
+    Callers should pass days since last_fired (preferred) or first_seen (fallback).
+    Use days_since_reference() to compute this from raw timestamps.
+
+    None means no reference timestamp exists — returns FRESHNESS_FLOOR.
+    This should be rare; all items have first_seen set.
     """
-    if days_since_fired is None:
+    if days_since_reference is None:
         return FRESHNESS_FLOOR
-    return max(FRESHNESS_FLOOR, 1.0 - FRESHNESS_DECAY_RATE * days_since_fired)
+    return max(FRESHNESS_FLOOR, 1.0 - FRESHNESS_DECAY_RATE * days_since_reference)
+
+
+def days_since_reference(
+    last_fired: str | None,
+    first_seen: str | None,
+    now: datetime,
+) -> int | None:
+    """Compute days since the reference timestamp for freshness.
+
+    Uses last_fired if available, falls back to first_seen so newly
+    created items (last_fired=NULL) start fresh rather than stale.
+    Returns None only if both are NULL (should not happen for real items).
+    """
+    ref_ts = last_fired or first_seen
+    if ref_ts is None:
+        return None
+    last = datetime.fromisoformat(ref_ts)
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return max(0, (now - last).days)
 
 
 def effective_confidence(base_confidence: float, freshness: float) -> float:

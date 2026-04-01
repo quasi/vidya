@@ -157,3 +157,15 @@ def test_default_classification_is_convention(db):
     result = extract_from_feedback(db, feedback)
     item = get_item(db, result["item_id"])
     assert item["type"] == "convention"
+
+
+def test_test_passed_does_not_create_or_update_items(db):
+    """test_passed is recorded but does NOT affect knowledge items."""
+    item_id = create_item(db, pattern="error handling", guidance="Handle errors",
+                          item_type="convention", language="python", base_confidence=0.5)
+    feedback = _feedback(db, "test_passed", "error handling test passed", language="python")
+    result = extract_from_feedback(db, feedback)
+    assert result is None
+    item = get_item(db, item_id)
+    assert item["base_confidence"] == 0.5
+    assert item["fire_count"] == 0

@@ -17,6 +17,30 @@ def _new_id() -> str:
 
 # Allowlist of columns that callers may update on knowledge_items.
 # Prevents SQL column injection via update_item(**fields).
+_VALID_OUTCOMES: frozenset[str] = frozenset({
+    "success", "partial", "failure", "abandoned",
+})
+
+_VALID_FEEDBACK_TYPES: frozenset[str] = frozenset({
+    "review_accepted", "review_rejected", "test_passed",
+    "test_failed", "user_correction", "user_confirmation",
+})
+
+_VALID_ITEM_TYPES: frozenset[str] = frozenset({
+    "convention", "anti_pattern", "precondition", "postcondition",
+    "heuristic", "diagnostic", "warning", "recovery", "workflow",
+})
+
+_VALID_RESULT_STATUSES: frozenset[str] = frozenset({
+    "success", "error", "timeout", "partial", "rejected",
+})
+
+
+def _validate(value: str, valid: frozenset[str], field_name: str) -> None:
+    if value not in valid:
+        raise ValueError(f"Invalid {field_name}: {value!r}. Must be one of: {sorted(valid)}")
+
+
 _ITEM_WRITABLE_COLUMNS: frozenset[str] = frozenset({
     "language", "runtime", "framework", "project",
     "pattern", "guidance", "type",
@@ -72,6 +96,7 @@ def end_task(
     outcome_detail: str | None = None,
     failure_type: str | None = None,
 ) -> None:
+    _validate(outcome, _VALID_OUTCOMES, "outcome")
     cursor = db.execute(
         """
         UPDATE task_records
@@ -100,6 +125,7 @@ def create_step(
     alternatives: str | None = None,
     duration_ms: int = 0,
 ) -> str:
+    _validate(result_status, _VALID_RESULT_STATUSES, "result_status")
     step_id = _new_id()
     # Sequence SELECT + INSERT must be atomic to prevent duplicate sequence numbers.
     with db:
@@ -145,6 +171,7 @@ def create_feedback(
     task_id: str | None = None,
     step_id: str | None = None,
 ) -> str:
+    _validate(feedback_type, _VALID_FEEDBACK_TYPES, "feedback_type")
     feedback_id = _new_id()
     db.execute(
         """
@@ -213,6 +240,7 @@ def create_item(
     _commit: bool = True,
 ) -> str:
     """Insert a knowledge item. Set _commit=False to batch multiple inserts."""
+    _validate(item_type, _VALID_ITEM_TYPES, "item_type")
     item_id = _insert_item_row(
         db, pattern, guidance, item_type, language, runtime, framework, project,
         base_confidence, source, evidence, explanation, overrides,
