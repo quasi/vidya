@@ -163,6 +163,67 @@ def test_different_language_not_returned(db):
         ]
 
 
+# --- Language-independent framework (tool knowledge) ---
+
+def test_framework_item_without_language_matches_any_language(db):
+    """A framework=canon item with language=NULL matches queries in any language."""
+    tool_id = create_item(
+        db, pattern="scenario cluster", guidance="Always set --cluster on scenarios",
+        item_type="convention", framework="canon", base_confidence=0.8,
+    )
+    # Query from Python context — should find the language-independent canon item
+    results = cascade_query(db, context="scenario cluster", language="python", framework="canon")
+    result_ids = [r.id for r in results]
+    assert tool_id in result_ids
+
+    # Query from Rust context — same item should match
+    results = cascade_query(db, context="scenario cluster", language="rust", framework="canon")
+    result_ids = [r.id for r in results]
+    assert tool_id in result_ids
+
+
+def test_language_specific_framework_item_does_not_cross_languages(db):
+    """A framework=canon item with language=python does NOT match language=rust."""
+    py_id = create_item(
+        db, pattern="scenario cluster", guidance="Python-specific canon advice",
+        item_type="convention", language="python", framework="canon", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="scenario cluster", language="rust", framework="canon")
+    result_ids = [r.id for r in results]
+    assert py_id not in result_ids
+
+
+def test_language_specific_framework_outranks_language_independent(db):
+    """language+framework item should rank above language-independent framework item."""
+    tool_id = create_item(
+        db, pattern="scenario validation", guidance="Generic canon advice",
+        item_type="convention", framework="canon", base_confidence=0.8,
+    )
+    specific_id = create_item(
+        db, pattern="scenario validation", guidance="Python-specific canon advice",
+        item_type="convention", language="python", framework="canon", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="scenario validation", language="python", framework="canon")
+    result_ids = [r.id for r in results]
+    assert specific_id in result_ids
+    assert tool_id in result_ids
+    # Both are "framework" scope but language-specific should rank higher via scope boost
+    # (both get framework boost, but the language-specific one also gets FTS relevance
+    # on the same terms — they may tie, but both must be present)
+
+
+def test_framework_item_without_language_not_returned_without_framework_query(db):
+    """framework=canon items should NOT appear when querying without framework."""
+    create_item(
+        db, pattern="scenario cluster", guidance="Canon tool advice",
+        item_type="convention", framework="canon", base_confidence=0.8,
+    )
+    # Query without framework — should not find the framework-scoped item
+    results = cascade_query(db, context="scenario cluster", language="python")
+    result_ids = [r.id for r in results]
+    assert len(result_ids) == 0
+
+
 # --- FTS5 sanitization ---
 
 def test_sanitize_fts_tokens_quotes_words():

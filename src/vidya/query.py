@@ -150,7 +150,7 @@ def _fetch_in_scope(
     #   - global (all scope columns NULL), OR
     #   - language matches (and runtime/framework/project are NULL in item), OR
     #   - runtime matches (and framework/project NULL in item), OR
-    #   - framework matches (and project NULL in item), OR
+    #   - framework matches (language-specific or language-independent tool knowledge), OR
     #   - project matches
     # We use a single query with OR conditions per scope level.
     params = []
@@ -164,6 +164,10 @@ def _fetch_in_scope(
         params.extend([language, runtime])
 
     if framework:
+        # Language-independent tool knowledge (e.g. framework=canon with language=NULL)
+        scope_clauses.append("(language IS NULL AND runtime IS NULL AND framework = ? AND project IS NULL)")
+        params.append(framework)
+        # Language-specific framework knowledge
         scope_clauses.append("(language = ? AND runtime IS NULL AND framework = ? AND project IS NULL)")
         params.extend([language, framework])
         if runtime:

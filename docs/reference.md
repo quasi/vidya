@@ -121,9 +121,12 @@ Items are scoped from broadest to narrowest. A query at project scope sees items
 global           (language=NULL, runtime=NULL, framework=NULL, project=NULL)
   language       (language set, rest NULL)
     runtime      (language + runtime set, rest NULL)
-    framework    (language + framework set, rest NULL)
+  framework      (framework set, language=NULL — tool knowledge, matches any language)
+    framework    (language + framework set — language-specific tool knowledge)
       project    (language + project set)
 ```
+
+**Framework as tool knowledge**: Items with `framework` set but `language=NULL` represent language-independent tool knowledge (e.g. how to use Canon, Docker, or pytest effectively). These match in any language context when the framework is specified in the query. Items with both `language` and `framework` set are language-specific tool knowledge.
 
 **Query cascade**: All matching scope levels are fetched. Narrower scope gets a higher boost multiplier when ranking results.
 
