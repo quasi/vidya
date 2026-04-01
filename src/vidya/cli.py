@@ -9,12 +9,12 @@ from vidya.schema import init_db
 from vidya.query import cascade_query
 from vidya.store import create_feedback, create_task, end_task, create_step, get_item, get_task
 from vidya.learn import extract_from_feedback
-from vidya.maintain import compute_stats
+from vidya.maintain import compute_stats, health_report, auto_archive_stale
 from vidya.seed import seed_from_file
 from vidya.brief import assemble_brief
 from vidya.guidance import (
     for_start_task, for_end_task, for_record_step,
-    for_query, for_feedback, for_explain, for_stats,
+    for_query, for_feedback, for_explain, for_stats, for_maintain,
 )
 
 
@@ -392,3 +392,58 @@ def step(ctx, task_id, action, result_text, outcome, rationale):
         }))
         return
     click.echo(f"Step recorded: {step_id}")
+
+
+@main.command()
+@click.option("--language", default=None)
+@click.option("--project", default=None)
+@click.option("--archive", is_flag=True, default=False,
+              help="Include archive recommendations for stale items.")
+@click.option("--confirm", is_flag=True, default=False,
+              help="Actually archive stale items (requires --archive).")
+@click.pass_context
+def maintain(ctx, language, project, archive, confirm):
+    """Run maintenance: health check, stale item detection, optional archival."""
+    db = _db()
+    report = health_report(db, language=language, project=project)
+
+    archive_result = None
+    if archive:
+        archive_result = auto_archive_stale(
+            db, language=language, project=project, dry_run=not confirm,
+        )
+
+    if ctx.obj.get("json"):
+        payload = {
+            "health": report["health"],
+            "total_items": report["total_items"],
+            "by_confidence": report["by_confidence"],
+            "stale_count": report["stale_count"],
+            "stale_items": report["stale_items"],
+        }
+        if archive_result is not None:
+            payload["archive"] = archive_result
+        payload["_guidance"] = for_maintain(
+            health=report["health"],
+            stale_count=report["stale_count"],
+            archive_result=archive_result,
+            db=db,
+        )
+        click.echo(json.dumps(payload))
+        return
+
+    click.echo(f"Health: {report['health']}")
+    click.echo(f"Items:  {report['total_items']} (HIGH={report['by_confidence']['high']} "
+               f"MED={report['by_confidence']['medium']} LOW={report['by_confidence']['low']})")
+    click.echo(f"Tasks:  {report['total_tasks']}  Feedback: {report['total_feedback']}")
+    if report["stale_count"] > 0:
+        click.echo(f"\nStale items ({report['stale_count']}):")
+        for s in report["stale_items"][:10]:
+            click.echo(f"  [{s['effective_confidence']:.3f}] {s['pattern'][:60]}")
+            click.echo(f"    {s['reason']}")
+    if archive_result:
+        if archive_result.get("archived_count", 0) > 0:
+            click.echo(f"\nArchived {archive_result['archived_count']} item(s).")
+        elif archive_result.get("would_archive_count", 0) > 0:
+            click.echo(f"\nWould archive {archive_result['would_archive_count']} item(s). "
+                       f"Use --confirm to execute.")

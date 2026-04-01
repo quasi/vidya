@@ -234,6 +234,38 @@ def for_stats(
     }
 
 
+def for_maintain(
+    health: str,
+    stale_count: int,
+    archive_result: dict[str, Any] | None,
+    db: sqlite3.Connection,
+) -> dict[str, str]:
+    if health == "empty":
+        return {
+            "note": "Knowledge base is empty.",
+            "next_step": "Seed knowledge with vidya seed before running maintenance.",
+        }
+
+    parts = [f"Health: {health}."]
+    if stale_count > 0:
+        parts.append(f"{stale_count} stale item{'s' if stale_count != 1 else ''} found.")
+
+    if archive_result:
+        if archive_result.get("archived_count", 0) > 0:
+            parts.append(f"Archived {archive_result['archived_count']} item(s).")
+        elif archive_result.get("would_archive_count", 0) > 0:
+            parts.append(f"{archive_result['would_archive_count']} item(s) would be archived. Use --confirm to execute.")
+
+    if health == "degraded":
+        next_step = "Review stale items with vidya items --min-confidence 0. Confirm or archive them."
+    elif stale_count > 0:
+        next_step = "Run vidya maintain --archive --confirm to clean up, or review items individually."
+    else:
+        next_step = "No maintenance needed. Continue working."
+
+    return {"note": " ".join(parts), "next_step": next_step}
+
+
 def for_record_step(
     outcome: str,
     matched_items: list[dict[str, Any]],

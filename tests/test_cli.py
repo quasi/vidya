@@ -243,3 +243,40 @@ def test_existing_query_human_still_works(cli, db):
     assert result.exit_code == 0, result.output
     assert "HIGH" in result.output or "MED" in result.output
     assert "Guidance:" in result.output
+
+
+# --- maintain ---
+
+def test_maintain_shows_health(cli):
+    result = cli.invoke(main, ["maintain"])
+    assert result.exit_code == 0, result.output
+    assert "Health:" in result.output
+
+
+def test_maintain_json_includes_health(cli, db):
+    create_item(db, pattern="test", guidance="test", item_type="convention",
+                base_confidence=0.5, source="seed")
+    result = cli.invoke(main, ["--json", "maintain"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "health" in data
+    assert "_guidance" in data
+
+
+def test_maintain_archive_flag_dry_run_by_default(cli, db):
+    create_item(db, pattern="weak", guidance="X", item_type="convention",
+                base_confidence=0.05, source="extraction")
+    result = cli.invoke(main, ["--json", "maintain", "--archive"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["archive"]["would_archive_count"] >= 1
+    assert data["archive"]["archived_count"] == 0
+
+
+def test_maintain_archive_confirm_actually_archives(cli, db):
+    create_item(db, pattern="weak", guidance="X", item_type="convention",
+                base_confidence=0.05, source="extraction")
+    result = cli.invoke(main, ["--json", "maintain", "--archive", "--confirm"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["archive"]["archived_count"] >= 1
