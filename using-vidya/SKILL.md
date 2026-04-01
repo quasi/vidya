@@ -99,8 +99,21 @@ vidya step \
   --action "Chose SQLAlchemy Core over ORM for feature queries" \
   --result "Query works, returns in <50ms" \
   --outcome success \
+  --action-type decision \
   --rationale "ORM adds unnecessary abstraction for read-only queries"
 ```
+
+**Action types** — use the right category for better pattern extraction:
+
+| Type | When to use | Example |
+|------|-------------|---------|
+| `tool_call` | Invoked a tool or command | "Ran pytest", "Read config.yaml" |
+| `decision` | Chose between alternatives (default) | "Chose SQLAlchemy Core over ORM" |
+| `discovery` | Learned something about the codebase | "Found that FTS5 needs manual trigger sync" |
+| `correction` | Fixed a mistake or changed approach | "Switched from mock to real DB in tests" |
+| `attempt` | Tried something — may succeed or fail | "Tried patching the module directly" |
+| `delegation` | Delegated to subagent or process | "Dispatched Haiku agents for 170 scenarios" |
+| `configuration` | Changed settings or environment | "Enabled WAL mode on SQLite" |
 
 **When to record a step:**
 - You chose between multiple approaches
@@ -183,6 +196,20 @@ vidya brief --language python --project myproject
 
 Returns: item counts by confidence band, items needing attention (never fired, high failure rate, stale), and input quality hints. Use `--json` for machine-readable output.
 
+### vidya maintain
+
+Run periodically or at session start for knowledge base hygiene.
+
+```bash
+vidya maintain --language python --project myproject
+```
+
+Flags:
+- `--archive` — dry-run: show what would be archived (stale items below confidence 0.1)
+- `--archive --confirm` — actually archive those items
+
+Use `--json` for machine-readable output. Returns health status (`healthy`, `degraded`, `empty`), stale item list, and optional archive results.
+
 ### vidya explain
 
 ```bash
@@ -213,3 +240,4 @@ A newly extracted item starts at 0.15 (LOW). It needs ~8 confirmations to reach 
 | Recording trivial steps | Noise drowns signal. Only record non-obvious decisions. |
 | Omitting `--project` | Items get created without project scope, weakening project-specific knowledge |
 | Not recording user corrections | User corrections are the highest-quality learning signal. Always capture them. |
+| Using only `decision` for all steps | Pick the right `--action-type` — Vidya uses these to cluster patterns |
