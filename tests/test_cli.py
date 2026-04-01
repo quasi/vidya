@@ -280,3 +280,47 @@ def test_maintain_archive_confirm_actually_archives(cli, db):
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert data["archive"]["archived_count"] >= 1
+
+
+# --- step action types ---
+
+def test_step_accepts_action_type(cli, db):
+    from vidya.store import create_task
+    task_id = create_task(db, goal="test", language="python")
+    result = cli.invoke(main, [
+        "step", "--task-id", task_id,
+        "--action", "Read the config file",
+        "--result", "Found the setting",
+        "--outcome", "success",
+        "--action-type", "discovery",
+    ])
+    assert result.exit_code == 0, result.output
+
+
+def test_step_defaults_action_type_to_decision(cli, db):
+    from vidya.store import create_task
+    task_id = create_task(db, goal="test", language="python")
+    result = cli.invoke(main, [
+        "step", "--task-id", task_id,
+        "--action", "Chose approach A",
+        "--result", "It worked",
+        "--outcome", "success",
+    ])
+    assert result.exit_code == 0, result.output
+    row = db.execute(
+        "SELECT action_type FROM step_records WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    assert row["action_type"] == "decision"
+
+
+def test_step_rejects_invalid_action_type(cli, db):
+    from vidya.store import create_task
+    task_id = create_task(db, goal="test", language="python")
+    result = cli.invoke(main, [
+        "step", "--task-id", task_id,
+        "--action", "test",
+        "--result", "test",
+        "--outcome", "success",
+        "--action-type", "nonsense",
+    ])
+    assert result.exit_code != 0

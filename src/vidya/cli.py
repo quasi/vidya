@@ -360,15 +360,19 @@ def task_end(ctx, task_id, outcome, outcome_detail, failure_type):
 @click.option("--result", "result_text", required=True, help="What happened.")
 @click.option("--outcome", required=True,
               type=click.Choice(["success", "error", "rejected"]))
+@click.option("--action-type", default="decision",
+              type=click.Choice(["tool_call", "decision", "discovery", "correction",
+                                 "attempt", "delegation", "configuration"]),
+              help="Category of action taken.")
 @click.option("--rationale", default=None)
 @click.pass_context
-def step(ctx, task_id, action, result_text, outcome, rationale):
+def step(ctx, task_id, action, result_text, outcome, action_type, rationale):
     """Record a step taken during a task."""
     db = _db()
     step_id = create_step(
         db,
         task_id=task_id,
-        action_type="decision",
+        action_type=action_type,
         action_name=action,
         result_status=outcome,
         result_output=result_text,
