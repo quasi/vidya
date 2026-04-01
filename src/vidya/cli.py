@@ -7,10 +7,15 @@ import click
 
 from vidya.schema import init_db
 from vidya.query import cascade_query
-from vidya.store import create_feedback, get_item
+from vidya.store import create_feedback, create_task, end_task, create_step, get_item, get_task
 from vidya.learn import extract_from_feedback
 from vidya.maintain import compute_stats
 from vidya.seed import seed_from_file
+from vidya.brief import assemble_brief
+from vidya.guidance import (
+    for_start_task, for_end_task, for_record_step,
+    for_query, for_feedback, for_explain, for_stats,
+)
 
 
 _DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
@@ -21,8 +26,13 @@ def _db():
 
 
 @click.group()
-def main():
+@click.option("--json", "output_json", is_flag=True, default=False,
+              help="Output as JSON (machine-readable).")
+@click.pass_context
+def main(ctx, output_json):
     """Vidya — agent-agnostic procedural learning system."""
+    ctx.ensure_object(dict)
+    ctx.obj["json"] = output_json
 
 
 @main.command()
@@ -33,10 +43,12 @@ def main():
 @click.option("--project", default=None)
 @click.option("--goal", default=None)
 @click.option("--min-confidence", default=0.2, type=float)
-def query(language, context, runtime, framework, project, goal, min_confidence):
+@click.pass_context
+def query(ctx, language, context, runtime, framework, project, goal, min_confidence):
     """Query knowledge items relevant to the current context."""
+    db = _db()
     results = cascade_query(
-        _db(),
+        db,
         context=context,
         language=language,
         runtime=runtime,
@@ -45,6 +57,24 @@ def query(language, context, runtime, framework, project, goal, min_confidence):
         goal=goal,
         min_confidence=min_confidence,
     )
+    if ctx.obj.get("json"):
+        items = [
+            {
+                "id": r.id,
+                "pattern": r.pattern,
+                "guidance": r.guidance,
+                "type": r.type,
+                "effective_confidence": round(r.effective_confidence, 3),
+                "scope_level": r.scope_level,
+                "match_reason": r.match_reason,
+            }
+            for r in results
+        ]
+        click.echo(json.dumps({
+            "items": items,
+            "_guidance": for_query(items=items, context=context, db=db),
+        }))
+        return
     if not results:
         click.echo("No matching items found.")
         return
@@ -59,9 +89,24 @@ def query(language, context, runtime, framework, project, goal, min_confidence):
 @main.command()
 @click.option("--language", default=None)
 @click.option("--project", default=None)
-def stats(language, project):
+@click.pass_context
+def stats(ctx, language, project):
     """Show knowledge base statistics."""
-    s = compute_stats(_db(), language=language, project=project)
+    db = _db()
+    s = compute_stats(db, language=language, project=project)
+    if ctx.obj.get("json"):
+        payload = {
+            "total_items": s.total_items,
+            "by_confidence": s.by_confidence,
+            "by_type": s.by_type,
+            "by_scope": s.by_scope,
+            "total_tasks": s.total_tasks,
+            "total_feedback": s.total_feedback,
+            "total_candidates": s.total_candidates,
+        }
+        payload["_guidance"] = for_stats(stats=payload, db=db)
+        click.echo(json.dumps(payload))
+        return
     click.echo(f"Total items:      {s.total_items}")
     click.echo(f"By confidence:    HIGH={s.by_confidence['high']}  MED={s.by_confidence['medium']}  LOW={s.by_confidence['low']}")
     click.echo(f"By scope:         {s.by_scope}")
@@ -73,10 +118,21 @@ def stats(language, project):
 
 @main.command()
 @click.option("--item-id", required=True)
-def explain(item_id):
+@click.pass_context
+def explain(ctx, item_id):
     """Explain why a knowledge item exists (evidence, confidence, overrides)."""
     db = _db()
     item = get_item(db, item_id)
+    overridden_by = db.execute(
+        "SELECT id, pattern, guidance FROM knowledge_items WHERE overrides = ? AND status = 'active'",
+        (item_id,),
+    ).fetchall()
+    overridden_list = [dict(r) for r in overridden_by]
+    if ctx.obj.get("json"):
+        payload = {"item": item, "overridden_by": overridden_list}
+        payload["_guidance"] = for_explain(item=item, overridden_by=overridden_list, db=db)
+        click.echo(json.dumps(payload, default=str))
+        return
     click.echo(json.dumps(item, indent=2, default=str))
 
 
@@ -87,7 +143,8 @@ def explain(item_id):
 @click.option("--framework", default=None)
 @click.option("--project", default=None)
 @click.option("--confidence", default=0.5, type=float)
-def seed(file_path, language, runtime, framework, project, confidence):
+@click.pass_context
+def seed(ctx, file_path, language, runtime, framework, project, confidence):
     """Seed knowledge items from a markdown rules file."""
     count = seed_from_file(
         _db(),
@@ -98,6 +155,9 @@ def seed(file_path, language, runtime, framework, project, confidence):
         project=project,
         base_confidence=confidence,
     )
+    if ctx.obj.get("json"):
+        click.echo(json.dumps({"created": count}))
+        return
     click.echo(f"Created {count} knowledge item(s).")
 
 
@@ -111,7 +171,8 @@ def seed(file_path, language, runtime, framework, project, confidence):
 @click.option("--framework", default=None)
 @click.option("--project", default=None)
 @click.option("--task-id", default=None)
-def feedback(feedback_type, detail, language, runtime, framework, project, task_id):
+@click.pass_context
+def feedback(ctx, feedback_type, detail, language, runtime, framework, project, task_id):
     """Record feedback and trigger knowledge extraction."""
     db = _db()
     feedback_id = create_feedback(
@@ -128,6 +189,13 @@ def feedback(feedback_type, detail, language, runtime, framework, project, task_
         "SELECT * FROM feedback_records WHERE id = ?", (feedback_id,)
     ).fetchone()
     result = extract_from_feedback(db, dict(feedback_row))
+    if ctx.obj.get("json"):
+        payload = result if result else {"updated": True}
+        payload["_guidance"] = for_feedback(
+            feedback_type=feedback_type, learning=result, db=db,
+        )
+        click.echo(json.dumps(payload))
+        return
     if result:
         if result.get("merged"):
             click.echo(f"Merged into existing item: {result['item_id']}")
@@ -141,7 +209,8 @@ def feedback(feedback_type, detail, language, runtime, framework, project, task_
 @click.option("--language", default=None)
 @click.option("--project", default=None)
 @click.option("--min-confidence", default=0.0, type=float)
-def items(language, project, min_confidence):
+@click.pass_context
+def items(ctx, language, project, min_confidence):
     """List knowledge items, optionally filtered."""
     db = _db()
     conditions = ["status = 'active'"]
@@ -161,6 +230,9 @@ def items(language, project, min_confidence):
         f"FROM knowledge_items WHERE {where} ORDER BY base_confidence DESC",
         params,
     ).fetchall()
+    if ctx.obj.get("json"):
+        click.echo(json.dumps([dict(r) for r in rows]))
+        return
     if not rows:
         click.echo("No items found.")
         return
@@ -168,3 +240,155 @@ def items(language, project, min_confidence):
         scope = row["project"] or row["language"] or "global"
         click.echo(f"[{row['base_confidence']:.2f}] [{row['type']}] [{scope}] {row['pattern']}")
         click.echo(f"  {row['guidance'][:80]}")
+
+
+@main.command()
+@click.option("--language", default=None)
+@click.option("--project", default=None)
+@click.pass_context
+def brief(ctx, language, project):
+    """Get a structured context dump: item counts, attention items, input hints."""
+    data = assemble_brief(_db(), language=language, project=project)
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(data))
+        return
+    state = data["project_state"]
+    click.echo(f"Items: {state['total_items']} (HIGH={state['high']} MED={state['medium']} LOW={state['low']})")
+    click.echo(f"Types: {state['by_type']}")
+    click.echo(f"Tasks: {state['total_tasks']}  Feedback: {state['total_feedback']}")
+    if state.get("last_task_outcome"):
+        click.echo(f"Last task: {state['last_task_outcome']}")
+    attention = data["attention_items"]
+    if attention:
+        click.echo(f"\nAttention ({len(attention)} item(s)):")
+        for a in attention[:5]:
+            click.echo(f"  [{a['id'][:8]}] {a['pattern'][:60]}")
+            click.echo(f"    {a['reason']}")
+
+
+@main.group()
+def task():
+    """Manage task lifecycle (start / end)."""
+
+
+@task.command("start")
+@click.option("--goal", required=True, help="What you intend to accomplish.")
+@click.option("--language", default=None)
+@click.option("--runtime", default=None)
+@click.option("--framework", default=None)
+@click.option("--project", default=None)
+@click.option("--goal-type", default=None)
+@click.pass_context
+def task_start(ctx, goal, language, runtime, framework, project, goal_type):
+    """Start a task and surface relevant knowledge."""
+    db = _db()
+    task_id = create_task(
+        db,
+        goal=goal,
+        language=language,
+        goal_type=goal_type,
+        runtime=runtime,
+        framework=framework,
+        project=project,
+    )
+    results = cascade_query(
+        db,
+        context=goal,
+        language=language,
+        runtime=runtime,
+        framework=framework,
+        project=project,
+    )
+    knowledge = [
+        {
+            "id": r.id,
+            "pattern": r.pattern,
+            "guidance": r.guidance,
+            "type": r.type,
+            "effective_confidence": round(r.effective_confidence, 3),
+            "scope_level": r.scope_level,
+            "match_reason": r.match_reason,
+        }
+        for r in results
+    ]
+    if ctx.obj.get("json"):
+        click.echo(json.dumps({
+            "task_id": task_id,
+            "knowledge": knowledge,
+            "_guidance": for_start_task(knowledge=knowledge, project=project, db=db),
+        }))
+        return
+    click.echo(f"Task: {task_id}")
+    if not knowledge:
+        click.echo("No matching knowledge items.")
+        return
+    for k in knowledge:
+        conf_label = "HIGH" if k["effective_confidence"] > 0.5 else "MED" if k["effective_confidence"] >= 0.2 else "LOW"
+        click.echo(f"\n[{conf_label} {k['effective_confidence']:.2f}] [{k['type']}] {k['pattern']}")
+        click.echo(f"  {k['guidance']}")
+
+
+@task.command("end")
+@click.option("--task-id", required=True)
+@click.option("--outcome", required=True,
+              type=click.Choice(["success", "partial", "failure", "abandoned"]))
+@click.option("--detail", "outcome_detail", default=None)
+@click.option("--failure-type", default=None)
+@click.pass_context
+def task_end(ctx, task_id, outcome, outcome_detail, failure_type):
+    """Mark a task complete."""
+    end_task(
+        _db(),
+        task_id=task_id,
+        outcome=outcome,
+        outcome_detail=outcome_detail,
+        failure_type=failure_type,
+    )
+    if ctx.obj.get("json"):
+        click.echo(json.dumps({
+            "ok": True,
+            "outcome": outcome,
+            "_guidance": for_end_task(outcome=outcome, task_id=task_id, db=_db()),
+        }))
+        return
+    click.echo(f"Task ended: {outcome}")
+
+
+@main.command()
+@click.option("--task-id", required=True)
+@click.option("--action", required=True, help="What was done.")
+@click.option("--result", "result_text", required=True, help="What happened.")
+@click.option("--outcome", required=True,
+              type=click.Choice(["success", "error", "rejected"]))
+@click.option("--rationale", default=None)
+@click.pass_context
+def step(ctx, task_id, action, result_text, outcome, rationale):
+    """Record a step taken during a task."""
+    db = _db()
+    step_id = create_step(
+        db,
+        task_id=task_id,
+        action_type="decision",
+        action_name=action,
+        result_status=outcome,
+        result_output=result_text,
+        thought=rationale,
+    )
+    if ctx.obj.get("json"):
+        task = get_task(db, task_id)
+        matched = cascade_query(
+            db,
+            context=action,
+            language=task.get("language"),
+            runtime=task.get("runtime"),
+            framework=task.get("framework"),
+            project=task.get("project"),
+        )
+        matched_items = [{"id": r.id, "pattern": r.pattern, "guidance": r.guidance} for r in matched]
+        click.echo(json.dumps({
+            "step_id": step_id,
+            "matched_items": matched_items,
+            "_guidance": for_record_step(outcome=outcome, matched_items=matched_items, db=db),
+        }))
+        return
+    click.echo(f"Step recorded: {step_id}")

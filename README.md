@@ -73,33 +73,44 @@ vidya feedback \
 
 This creates a new knowledge item at LOW confidence. Repeat confirmations raise it to HIGH.
 
-## Interfaces
-
-Vidya is a Python library with two thin wrappers. No business logic lives in the interface layer.
-
-### MCP Server
-
-For AI agents that support the [Model Context Protocol](https://modelcontextprotocol.io/):
+### 4. Track task lifecycle
 
 ```bash
-vidya-server
+# Start a task — surfaces relevant knowledge
+vidya task start --goal "add error handling to API" --language python --project myproject
+
+# Record a step
+vidya step --task-id <id> --action "added try/except" --result "tests pass" --outcome success
+
+# Mark complete
+vidya task end --task-id <id> --outcome success
 ```
 
-Exposes 8 tools: `vidya_start_task`, `vidya_end_task`, `vidya_record_step`, `vidya_query`, `vidya_feedback`, `vidya_explain`, `vidya_stats`, `vidya_brief`.
+### 5. Get a situational brief
 
-Every MCP response includes a `_guidance` field with a contextual `note` and `next_step` — the agent reads these to know what to do next.
+```bash
+vidya brief --language python --project myproject
+```
 
-### CLI
-
-For humans and scripts:
+## CLI Reference
 
 ```
-vidya seed       Seed knowledge from a markdown rules file
-vidya query      Query relevant knowledge items
-vidya feedback   Record feedback and trigger learning
-vidya items      List knowledge items
-vidya stats      Show knowledge base statistics
-vidya explain    Show evidence trail for a knowledge item
+vidya [--json] seed         Seed knowledge from a markdown rules file
+vidya [--json] query        Query relevant knowledge items
+vidya [--json] feedback     Record feedback and trigger learning
+vidya [--json] task start   Start a task and surface relevant knowledge
+vidya [--json] task end     Mark a task complete
+vidya [--json] step         Record a step taken during a task
+vidya [--json] brief        Structured context dump (items, attention, hints)
+vidya [--json] items        List knowledge items
+vidya [--json] stats        Show knowledge base statistics
+vidya [--json] explain      Show evidence trail for a knowledge item
+```
+
+Pass `--json` before any subcommand for machine-readable output:
+
+```bash
+vidya --json query --context "error handling" --language python
 ```
 
 Run `vidya --help` or `vidya <command> --help` for options.
@@ -149,29 +160,25 @@ src/vidya/
   query.py        Cascade query with scope resolution and FTS5 ranking
   confidence.py   Bayesian confidence updates and freshness decay
   learn.py        Feedback-driven knowledge extraction
-  brief.py        Structured context dump for vidya_brief
-  guidance.py     Contextual guidance for MCP responses
+  brief.py        Structured context dump for vidya brief
   maintain.py     Statistics computation
   seed.py         Import knowledge from markdown files
   cli.py          CLI (Click)
-  mcp_server.py   MCP server (stdio)
-tests/            106 tests
+tests/            113 tests
 ```
 
 ## Documentation
 
-- [Reference](docs/reference.md) — Knowledge model, confidence math, CLI/MCP tool reference, seed format, database schema
+- [Reference](docs/reference.md) — Knowledge model, confidence math, CLI tool reference, seed format, database schema
 - [Design](docs/design.md) — Architecture, design decisions, what Vidya is and isn't
 - [Phase 2 Spec](docs/phase2-spec.md) — Upcoming features and open questions
 
 ## Status
 
-Phase 1 complete. 12 source modules, 106 tests, all passing. MCP server and CLI both operational.
+Phase 1 complete. 10 source modules, 113 tests, all passing. CLI operational.
 
 Phase 2 (capacity eviction, drift detection, pattern-based extraction) is designed but not yet implemented.
 
 ## Author & License
 
 Abhijit Rao (quasi) / quasiLabs / 2026 / [MIT](LICENSE)
-
-

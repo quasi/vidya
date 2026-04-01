@@ -1,7 +1,7 @@
 ---
 name: using-vidya
-description: How to use Vidya's MCP tools effectively — procedural learning that accumulates knowledge across sessions and serves it back
-version: 0.1.0
+description: How to use Vidya's CLI effectively — procedural learning that accumulates knowledge across sessions and serves it back
+version: 0.2.0
 author: quasiLabs
 type: workflow
 ---
@@ -16,58 +16,66 @@ Vidya accumulates procedural knowledge across sessions and serves it back. It kn
   Work on task
        |
        v
-  vidya_start_task  -->  Get relevant knowledge
+  vidya task start  -->  Get relevant knowledge + save task_id
        |
        v
   Apply knowledge, make decisions
        |
        v
-  vidya_record_step  -->  Log non-obvious decisions
+  vidya step  -->  Log non-obvious decisions
        |
        v
   Outcome happens (success, failure, user correction)
        |
        v
-  vidya_feedback  -->  Vidya learns from the outcome
+  vidya feedback  -->  Vidya learns from the outcome
        |
        v
-  vidya_end_task  -->  Close the loop
+  vidya task end  -->  Close the loop
        |
        v
   Next session: better knowledge available
 ```
 
-Every significant task should have a `vidya_start_task` at the beginning and a `vidya_end_task` at the end. The feedback step is what makes Vidya smarter over time.
+Every significant task should have a `vidya task start` at the beginning and a `vidya task end` at the end. The feedback step is what makes Vidya smarter over time.
+
+## Automatic Context Injection
+
+Vidya is wired into Claude Code hooks. On every prompt, `vidya query` runs automatically and injects relevant knowledge into your context — you will see a `[Vidya knowledge for this task]` block. At session start, `vidya brief` injects the knowledge base state and any attention items. When a bash command fails, `vidya feedback --type test_failed` fires automatically if relevant items exist.
+
+You do not need to manually run `vidya query` for every prompt. Do run it explicitly when you need targeted knowledge mid-task on a specific subtopic.
 
 ## When to Call Each Tool
 
-### vidya_start_task
+### vidya task start
 
 Call once at the start of every task.
 
-```
-vidya_start_task(
-  goal="Add error handling to feature X",
-  language="python",
-  project="myproject"
-)
+```bash
+vidya task start \
+  --goal "Add error handling to feature X" \
+  --language python \
+  --project myproject
 ```
 
-- Always set `language`. Set `project` when working in a specific project.
-- Set `goal_type` when obvious: `create`, `modify`, `debug`, `refactor`, `review`.
+- Always set `--language`. Set `--project` when working in a specific project.
+- Set `--goal-type` when obvious: `create`, `modify`, `debug`, `refactor`, `review`.
 - **Read the returned knowledge items.** HIGH-confidence items are earned rules. Follow them unless you have a specific reason not to.
-- Save the `task_id` — you need it for every subsequent call.
+- Save the printed `Task: <id>` — you need it for every subsequent call. Use `--json` to capture it programmatically.
 
-### vidya_query
-
-Call when you need knowledge about a specific subtask or decision.
-
+```bash
+TASK_ID=$(vidya --json task start --goal "Add error handling" --language python | python3 -c "import sys,json; print(json.load(sys.stdin)['task_id'])")
 ```
-vidya_query(
-  context="running pytest with uv",
-  language="python",
-  project="myproject"
-)
+
+### vidya query
+
+Call when you need knowledge about a specific subtask or decision. (Also runs automatically on every prompt via the UserPromptSubmit hook.)
+
+```bash
+vidya query \
+  --context "running pytest with uv" \
+  --language python \
+  --project myproject
 ```
 
 **How to write good context strings:**
@@ -81,18 +89,17 @@ vidya_query(
 
 FTS matches on individual words joined with OR. Use specific technical terms. Avoid filler words like "need", "want", "trying", "stuff".
 
-### vidya_record_step
+### vidya step
 
 Call for non-obvious decisions. Skip trivial actions.
 
-```
-vidya_record_step(
-  task_id="...",
-  action="Chose SQLAlchemy Core over ORM for feature queries",
-  result="Query works, returns in <50ms",
-  outcome="success",
-  rationale="ORM adds unnecessary abstraction for read-only queries"
-)
+```bash
+vidya step \
+  --task-id "$TASK_ID" \
+  --action "Chose SQLAlchemy Core over ORM for feature queries" \
+  --result "Query works, returns in <50ms" \
+  --outcome success \
+  --rationale "ORM adds unnecessary abstraction for read-only queries"
 ```
 
 **When to record a step:**
@@ -105,46 +112,43 @@ vidya_record_step(
 - Routine file reads, standard test runs, obvious edits
 - The action is trivially the only option
 
-### vidya_feedback
+### vidya feedback
 
 The most important tool for learning. Quality here determines whether Vidya gets smarter.
 
 **After user corrections:**
-```
-vidya_feedback(
-  feedback_type="user_correction",
-  detail="Always use uv run python -m pytest, never bare pytest",
-  language="python",
-  project="myproject",
-  task_id="..."
-)
+```bash
+vidya feedback \
+  --type user_correction \
+  --detail "Always use uv run python -m pytest, never bare pytest" \
+  --language python \
+  --project myproject \
+  --task-id "$TASK_ID"
 ```
 
 **After user confirms an approach:**
-```
-vidya_feedback(
-  feedback_type="user_confirmation",
-  detail="Using SQLAlchemy Core not ORM for read queries is correct here",
-  language="python",
-  project="myproject",
-  task_id="..."
-)
+```bash
+vidya feedback \
+  --type user_confirmation \
+  --detail "Using SQLAlchemy Core not ORM for read queries is correct here" \
+  --language python \
+  --project myproject \
+  --task-id "$TASK_ID"
 ```
 
 **After test failures:**
-```
-vidya_feedback(
-  feedback_type="test_failed",
-  detail="CCC scenario.language_independent failed — code found in Given/When/Then",
-  language="python",
-  project="myproject",
-  task_id="..."
-)
+```bash
+vidya feedback \
+  --type test_failed \
+  --detail "CCC scenario.language_independent failed — code found in Given/When/Then" \
+  --language python \
+  --project myproject \
+  --task-id "$TASK_ID"
 ```
 
 **How to write good detail text:**
 
-The `detail` text becomes the item's guidance verbatim. Write the rule you wish existed:
+The `--detail` text becomes the item's guidance verbatim. Write the rule you wish existed:
 
 | Good detail | Bad detail |
 |------------|-----------|
@@ -157,61 +161,43 @@ Rules of thumb:
 - **Specific**: name the function, file, pattern, or command
 - **Self-contained**: someone reading just this sentence should know what to do
 
-### vidya_end_task
+### vidya task end
 
-```
-vidya_end_task(
-  task_id="...",
-  outcome="success"
-)
+```bash
+vidya task end \
+  --task-id "$TASK_ID" \
+  --outcome success
 ```
 
 Outcomes: `success`, `partial`, `failure`, `abandoned`.
 
-On `failure`, also set `failure_type`: `incomplete`, `constraint_violation`, `wrong_result`, `tool_error`.
+On `failure`, also set `--failure-type`: `incomplete`, `constraint_violation`, `wrong_result`, `tool_error`.
 
-### vidya_brief
+### vidya brief
 
-Call when you want a structured overview of what Vidya knows. Good at session start or when you need situational awareness.
+Call when you want a structured overview of what Vidya knows. Good when you need situational awareness beyond what the automatic hook injected.
 
+```bash
+vidya brief --language python --project myproject
 ```
-vidya_brief(language="python", project="myproject")
-```
 
-Returns: item counts by confidence band, items needing attention (never fired, high failure rate, stale), and input quality hints.
+Returns: item counts by confidence band, items needing attention (never fired, high failure rate, stale), and input quality hints. Use `--json` for machine-readable output.
 
-### vidya_explain
+### vidya explain
 
-```
-vidya_explain(item_id="...")
+```bash
+vidya explain --item-id "<id>"
 ```
 
 Use when you encounter an item and want to know: where did it come from? How many times has it been confirmed? Has it ever failed? Is it being overridden?
-
-## Reading _guidance in Responses
-
-Every Vidya tool response includes a `_guidance` field:
-
-```json
-{
-  "task_id": "...",
-  "knowledge": [...],
-  "_guidance": {
-    "note": "3 HIGH-confidence items returned. 2 never validated.",
-    "next_step": "Follow HIGH items. Call vidya_feedback after corrections."
-  }
-}
-```
-
-Read `_guidance.note` for situational awareness. Follow `_guidance.next_step` for what to do next. These are contextual — they change based on the specific response data.
 
 ## Confidence Bands
 
 | Band | Threshold | What to do |
 |------|-----------|------------|
 | HIGH (> 0.5) | Earned through confirmations | Follow this guidance. Deviate only with good reason. |
-| MEDIUM (0.2-0.5) | Not yet proven | Treat as a suggestion. Verify before relying on it. Confirm via `vidya_feedback` if it helps. |
-| LOW (< 0.2) | Stale or unreliable | Not returned in normal queries. Visible in `vidya_explain`. |
+| MEDIUM (0.2-0.5) | Not yet proven | Treat as a suggestion. Verify before relying on it. Confirm via `vidya feedback` if it helps. |
+| LOW (< 0.2) | Stale or unreliable | Not returned in normal queries. Visible in `vidya explain`. |
 
 A newly extracted item starts at 0.15 (LOW). It needs ~8 confirmations to reach HIGH. Seeded items start at 0.5-0.6 (HIGH).
 
@@ -219,11 +205,11 @@ A newly extracted item starts at 0.15 (LOW). It needs ~8 confirmations to reach 
 
 | Mistake | Fix |
 |---------|-----|
-| Forgetting `vidya_start_task` at task start | No task_id, no learning linkage. Always start a task. |
-| Vague `context` in `vidya_query` | Use specific technical terms, not natural language sentences |
-| Vague `detail` in `vidya_feedback` | Write the rule you wish existed, in imperative voice |
-| Skipping `vidya_end_task` | Vidya can't track success/failure patterns. Always end the task. |
+| Forgetting `vidya task start` at task start | No task_id, no learning linkage. Always start a task. |
+| Vague `--context` in `vidya query` | Use specific technical terms, not natural language sentences |
+| Vague `--detail` in `vidya feedback` | Write the rule you wished existed, in imperative voice |
+| Skipping `vidya task end` | Vidya can't track success/failure patterns. Always end the task. |
 | Ignoring HIGH-confidence items | They were earned. Follow them unless you have a documented reason. |
 | Recording trivial steps | Noise drowns signal. Only record non-obvious decisions. |
-| Omitting `project` | Items get created without project scope, weakening project-specific knowledge |
+| Omitting `--project` | Items get created without project scope, weakening project-specific knowledge |
 | Not recording user corrections | User corrections are the highest-quality learning signal. Always capture them. |
