@@ -35,6 +35,16 @@ _VALID_RESULT_STATUSES: frozenset[str] = frozenset({
     "success", "error", "timeout", "partial", "rejected",
 })
 
+_VALID_ACTION_TYPES: frozenset[str] = frozenset({
+    "tool_call",       # Invoked a tool (file read, write, bash, grep, etc.)
+    "decision",        # Chose between alternatives
+    "discovery",       # Learned something about the codebase or environment
+    "correction",      # Fixed a mistake or changed approach after error
+    "attempt",         # Tried something — may succeed or fail
+    "delegation",      # Delegated to subagent or external process
+    "configuration",   # Changed settings, environment, or config
+})
+
 
 def _validate(value: str, valid: frozenset[str], field_name: str) -> None:
     if value not in valid:
@@ -125,6 +135,7 @@ def create_step(
     alternatives: str | None = None,
     duration_ms: int = 0,
 ) -> str:
+    _validate(action_type, _VALID_ACTION_TYPES, "action_type")
     _validate(result_status, _VALID_RESULT_STATUSES, "result_status")
     step_id = _new_id()
     # Sequence SELECT + INSERT must be atomic to prevent duplicate sequence numbers.

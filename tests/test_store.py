@@ -293,3 +293,29 @@ def test_create_feedback_rejects_invalid_type(db):
 def test_create_item_rejects_invalid_type(db):
     with pytest.raises(ValueError, match="Invalid item_type"):
         create_item(db, pattern="X", guidance="Y", item_type="bogus")
+
+
+# --- structured action_type validation ---
+
+def test_create_step_accepts_valid_action_types(db):
+    """All defined action types are accepted."""
+    task_id = create_task(db, goal="test", language="python")
+    valid_types = [
+        "tool_call", "decision", "discovery", "correction",
+        "attempt", "delegation", "configuration",
+    ]
+    for at in valid_types:
+        step_id = create_step(
+            db, task_id=task_id, action_type=at,
+            action_name="test action", result_status="success",
+        )
+        assert step_id is not None
+
+
+def test_create_step_rejects_invalid_action_type(db):
+    task_id = create_task(db, goal="test", language="python")
+    with pytest.raises(ValueError, match="Invalid action_type"):
+        create_step(
+            db, task_id=task_id, action_type="random_thing",
+            action_name="test", result_status="success",
+        )
