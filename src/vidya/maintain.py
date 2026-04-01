@@ -7,6 +7,7 @@ Freshness is computed at query time (not batch-updated) — see confidence.py.
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
 
@@ -105,3 +106,56 @@ def compute_stats(
     ).fetchone()[0]
 
     return stats
+
+
+def find_stale_items(
+    db: sqlite3.Connection,
+    language: str | None = None,
+    project: str | None = None,
+    stale_days: int = 90,
+    min_confidence: float = 0.2,
+) -> list[dict[str, Any]]:
+    """Find items that are stale: unfired for too long, or below confidence threshold."""
+    now = datetime.now(timezone.utc)
+    conditions = ["status = 'active'"]
+    params: list = []
+    if language:
+        conditions.append("language = ?")
+        params.append(language)
+    if project:
+        conditions.append("project = ?")
+        params.append(project)
+    where = " AND ".join(conditions)
+
+    rows = db.execute(
+        f"SELECT id, pattern, guidance, base_confidence, last_fired, first_seen, "
+        f"fire_count FROM knowledge_items WHERE {where}",
+        params,
+    ).fetchall()
+
+    stale: list[dict[str, Any]] = []
+    for row in rows:
+        days = days_since_reference(row["last_fired"], row["first_seen"], now)
+        fresh = compute_freshness(days)
+        eff = effective_confidence(row["base_confidence"], fresh)
+
+        reasons = []
+        if row["fire_count"] == 0 and days >= stale_days:
+            reasons.append(f"Never fired, created {int(days)} days ago")
+        elif row["fire_count"] > 0 and days >= stale_days:
+            reasons.append(f"Last fired {int(days)} days ago")
+        if eff < min_confidence:
+            reasons.append(f"Effective confidence {eff:.3f} below {min_confidence}")
+
+        if reasons:
+            stale.append({
+                "id": row["id"],
+                "pattern": row["pattern"],
+                "guidance": row["guidance"],
+                "reason": "; ".join(reasons),
+                "effective_confidence": round(eff, 3),
+                "days_since_activity": int(days),
+            })
+
+    stale.sort(key=lambda x: x["effective_confidence"])
+    return stale
