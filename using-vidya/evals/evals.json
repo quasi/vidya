@@ -1,0 +1,45 @@
+{
+  "skill_name": "using-vidya",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I need to add a --verbose flag to the vidya query command that shows the FTS5 match scores alongside each result. The flag should be off by default. Start working on this — the project is at /Users/quasi/quasilabs/projects/vidya, it's Python, and we use uv for everything.",
+      "expected_output": "Agent should start with vidya task start, record key decisions as steps, use feedback for corrections, and end with vidya task end. Should properly use --language python --project vidya throughout.",
+      "files": [],
+      "expectations": [
+        "Agent calls vidya task start with --goal, --language python, and --project",
+        "Agent saves the task_id from task start and uses it in subsequent calls",
+        "Agent calls vidya task end with --task-id and --outcome at the end",
+        "Agent records at least one non-trivial step with vidya step",
+        "Agent uses appropriate --action-type values (not all 'decision')",
+        "Agent does NOT manually run vidya query for every prompt (knows hooks handle it)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Wait, no — don't use Click's built-in verbose flag. Use a custom --show-scores flag instead, I want it to be more explicit about what it does. Also the output format should be 'score: 0.85 | item text' not the other way around.",
+      "expected_output": "Agent should record a vidya feedback --type user_correction capturing both the flag rename and the output format requirement. Should record a correction step. Should NOT start a new task (this is a continuation).",
+      "files": [],
+      "expectations": [
+        "Agent calls vidya feedback with --type user_correction",
+        "The feedback --detail is specific and imperative (not vague like 'user wants different flag')",
+        "Agent records a step with --action-type correction",
+        "Agent does NOT call vidya task start again (continuation of existing task)",
+        "Agent uses the saved task_id from the previous eval's task start"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I'm starting a new session. I want to debug why vidya maintain --archive is showing 0 items even though there are clearly stale items in the DB. Project is vidya, language is python.",
+      "expected_output": "Agent should start with vidya task start for debugging, use --goal-type debug, record discovery steps as it investigates, and properly close the task.",
+      "files": [],
+      "expectations": [
+        "Agent calls vidya task start with --goal-type debug",
+        "Agent sets --language python and --project vidya on task start",
+        "Agent records discovery steps (--action-type discovery) when finding root causes",
+        "Agent uses vidya query manually at least once for targeted lookup on archive/stale logic",
+        "Agent calls vidya task end when debugging is complete"
+      ]
+    }
+  ]
+}
