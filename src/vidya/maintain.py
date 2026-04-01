@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
+from vidya.store import archive_item
 
 
 @dataclass
@@ -159,6 +160,43 @@ def find_stale_items(
 
     stale.sort(key=lambda x: x["effective_confidence"])
     return stale
+
+
+def auto_archive_stale(
+    db: sqlite3.Connection,
+    language: str | None = None,
+    project: str | None = None,
+    dry_run: bool = True,
+    archive_threshold: float = 0.1,
+) -> dict[str, Any]:
+    """Archive items with effective confidence below archive_threshold.
+
+    Args:
+        dry_run: If True, report what would be archived without doing it.
+        archive_threshold: Items with effective_confidence below this get archived.
+    """
+    stale = find_stale_items(db, language=language, project=project, min_confidence=archive_threshold)
+    candidates = [s for s in stale if s["effective_confidence"] < archive_threshold]
+
+    if dry_run:
+        return {
+            "archived_count": 0,
+            "archived_ids": [],
+            "would_archive_count": len(candidates),
+            "would_archive": candidates,
+        }
+
+    archived_ids = []
+    for item in candidates:
+        archive_item(db, item["id"], reason=f"auto-archive: {item['reason']}")
+        archived_ids.append(item["id"])
+
+    return {
+        "archived_count": len(archived_ids),
+        "archived_ids": archived_ids,
+        "would_archive_count": 0,
+        "would_archive": [],
+    }
 
 
 def health_report(

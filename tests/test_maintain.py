@@ -3,8 +3,8 @@
 import pytest
 from datetime import datetime, timezone, timedelta
 
-from vidya.store import create_item, update_item
-from vidya.maintain import compute_stats, find_stale_items, health_report
+from vidya.store import create_item, update_item, get_item
+from vidya.maintain import compute_stats, find_stale_items, health_report, auto_archive_stale
 
 
 def test_find_stale_items_returns_empty_for_fresh_items(db):
@@ -96,3 +96,31 @@ def test_health_report_degraded_when_many_stale(db):
     report = health_report(db)
     assert report["health"] == "degraded"
     assert report["stale_count"] == 3
+
+
+def test_auto_archive_archives_stale_items(db):
+    """Items below archive threshold get archived."""
+    item_id = create_item(db, pattern="dead rule", guidance="X",
+                          item_type="convention", base_confidence=0.05, source="extraction")
+    result = auto_archive_stale(db, dry_run=False)
+    assert result["archived_count"] == 1
+    assert item_id in result["archived_ids"]
+    item = get_item(db, item_id)
+    assert item["status"] == "archived"
+
+
+def test_auto_archive_dry_run_does_not_archive(db):
+    """Dry run reports but does not archive."""
+    create_item(db, pattern="dead rule", guidance="X",
+                item_type="convention", base_confidence=0.05, source="extraction")
+    result = auto_archive_stale(db, dry_run=True)
+    assert result["archived_count"] == 0
+    assert result["would_archive_count"] == 1
+
+
+def test_auto_archive_skips_items_above_threshold(db):
+    """Healthy items are not archived."""
+    create_item(db, pattern="good rule", guidance="X",
+                item_type="convention", base_confidence=0.6, source="seed")
+    result = auto_archive_stale(db, dry_run=False)
+    assert result["archived_count"] == 0
