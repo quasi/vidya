@@ -7,7 +7,10 @@ import click
 
 from vidya.schema import init_db
 from vidya.query import cascade_query
-from vidya.store import create_feedback, create_task, end_task, create_step, get_item, get_task
+from vidya.store import (
+    create_feedback, create_task, end_task, create_step, get_item, get_task,
+    _VALID_ACTION_TYPES,
+)
 from vidya.learn import extract_from_feedback
 from vidya.maintain import compute_stats, health_report, auto_archive_stale
 from vidya.seed import seed_from_file
@@ -361,8 +364,7 @@ def task_end(ctx, task_id, outcome, outcome_detail, failure_type):
 @click.option("--outcome", required=True,
               type=click.Choice(["success", "error", "rejected"]))
 @click.option("--action-type", default="decision",
-              type=click.Choice(["tool_call", "decision", "discovery", "correction",
-                                 "attempt", "delegation", "configuration"]),
+              type=click.Choice(sorted(_VALID_ACTION_TYPES)),
               help="Category of action taken.")
 @click.option("--rationale", default=None)
 @click.pass_context
@@ -408,6 +410,8 @@ def step(ctx, task_id, action, result_text, outcome, action_type, rationale):
 @click.pass_context
 def maintain(ctx, language, project, archive, confirm):
     """Run maintenance: health check, stale item detection, optional archival."""
+    if confirm and not archive:
+        raise click.UsageError("--confirm requires --archive")
     db = _db()
     report = health_report(db, language=language, project=project)
 
@@ -431,7 +435,6 @@ def maintain(ctx, language, project, archive, confirm):
             health=report["health"],
             stale_count=report["stale_count"],
             archive_result=archive_result,
-            db=db,
         )
         click.echo(json.dumps(payload))
         return

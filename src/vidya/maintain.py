@@ -175,6 +175,10 @@ def auto_archive_stale(
         dry_run: If True, report what would be archived without doing it.
         archive_threshold: Items with effective_confidence below this get archived.
     """
+    # find_stale_items returns items stale for ANY reason (age OR low confidence).
+    # The candidates filter then narrows to those below archive_threshold.
+    # This two-step is intentional: archive_threshold (0.1) < health_report's
+    # min_confidence (0.2), so we only archive the worst items, not all stale ones.
     stale = find_stale_items(db, language=language, project=project, min_confidence=archive_threshold)
     candidates = [s for s in stale if s["effective_confidence"] < archive_threshold]
 

@@ -238,7 +238,6 @@ def for_maintain(
     health: str,
     stale_count: int,
     archive_result: dict[str, Any] | None,
-    db: sqlite3.Connection,
 ) -> dict[str, str]:
     if health == "empty":
         return {
