@@ -23,7 +23,8 @@ Requires Python 3.12+.
 ```bash
 git clone https://github.com/quasi/vidya.git
 cd vidya
-pip install -e ".[dev]"
+uv sync
+uv tool install .
 ```
 
 ## Quickstart
