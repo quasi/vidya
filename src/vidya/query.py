@@ -100,11 +100,17 @@ def cascade_query(
     # If there are no FTS matches at all (empty context etc.), return all in-scope items.
     has_fts_matches = bool(fts_scores)
 
+    # Items scoring below this fraction of the best FTS score are stopword noise,
+    # not real matches. FTS5 assigns tiny non-zero scores (~1e-7) to items that
+    # happen to contain common words ("the", "and") in the query — exact equality
+    # to 0.0 misses these, so use a meaningful minimum instead.
+    FTS_NOISE_THRESHOLD = 0.05
+
     scored = []
     for row, eff in candidates:
         fts = fts_scores.get(row["id"], 0.0)
-        if has_fts_matches and fts == 0.0:
-            # FTS matches exist but this item didn't match — skip it
+        if has_fts_matches and fts < FTS_NOISE_THRESHOLD:
+            # FTS matches exist but this item scored below noise floor — skip it
             continue
         scope = _scope_level(row)
         boost = _SCOPE_BOOST[scope]
