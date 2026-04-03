@@ -247,11 +247,12 @@ def items(ctx, language, project, min_confidence):
 
 @main.command()
 @click.option("--language", default=None)
+@click.option("--framework", default=None)
 @click.option("--project", default=None)
 @click.pass_context
-def brief(ctx, language, project):
+def brief(ctx, language, framework, project):
     """Get a structured context dump: item counts, attention items, input hints."""
-    data = assemble_brief(_db(), language=language, project=project)
+    data = assemble_brief(_db(), language=language, framework=framework, project=project)
     if ctx.obj.get("json"):
         click.echo(json.dumps(data))
         return

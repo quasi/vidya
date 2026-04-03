@@ -14,12 +14,13 @@ from vidya.confidence import compute_freshness, days_since_reference, effective_
 def assemble_brief(
     db: sqlite3.Connection,
     language: str | None = None,
+    framework: str | None = None,
     project: str | None = None,
 ) -> dict[str, Any]:
     """Assemble a structured brief for the calling agent."""
-    rows = _fetch_scoped_items(db, language, project)
+    rows = _fetch_scoped_items(db, language, framework, project)
     return {
-        "project_state": _project_state(db, language, project, rows),
+        "project_state": _project_state(db, language, framework, project, rows),
         "attention_items": _attention_items(rows),
         "input_quality_hints": _input_quality_hints(),
     }
@@ -28,6 +29,7 @@ def assemble_brief(
 def _fetch_scoped_items(
     db: sqlite3.Connection,
     language: str | None,
+    framework: str | None,
     project: str | None,
 ) -> list:
     """Fetch active knowledge items for the given scope (shared by state and attention)."""
@@ -36,6 +38,9 @@ def _fetch_scoped_items(
     if language:
         conditions.append("language = ?")
         params.append(language)
+    if framework:
+        conditions.append("framework = ?")
+        params.append(framework)
     if project:
         conditions.append("project = ?")
         params.append(project)
@@ -51,6 +56,7 @@ def _fetch_scoped_items(
 def _project_state(
     db: sqlite3.Connection,
     language: str | None,
+    framework: str | None,
     project: str | None,
     rows: list,
 ) -> dict[str, Any]:
@@ -85,6 +91,10 @@ def _project_state(
     if language:
         task_where = " WHERE language = ?"
         task_params.append(language)
+    if framework:
+        sep = " AND " if task_where else " WHERE "
+        task_where += f"{sep}framework = ?"
+        task_params.append(framework)
     if project:
         sep = " AND " if task_where else " WHERE "
         task_where += f"{sep}project = ?"
