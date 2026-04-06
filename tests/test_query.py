@@ -76,34 +76,28 @@ def test_fts_matches_relevant_terms(db):
     assert db_id not in result_ids
 
 
-# --- Test 4: freshness affects ranking ---
+# --- Test 4: base_confidence determines effective_confidence ---
 
-def test_stale_item_ranks_below_fresh_item(db):
-    """Stale item (same base_confidence) ranks below a recently-fired fresh item."""
-    fresh_id = create_item(
-        db, pattern="testing approach", guidance="Use pytest fixtures", item_type="convention",
-        language="python", base_confidence=0.6
-    )
-    stale_id = create_item(
-        db, pattern="testing approach best practice", guidance="Write tests first always", item_type="convention",
-        language="python", base_confidence=0.6
+def test_stale_item_still_returned_at_base_confidence(db):
+    """Stale last_fired no longer penalises ranking — item is returned at base_confidence."""
+    from datetime import datetime, timezone, timedelta
+    item_id = create_item(
+        db, pattern="testing approach best practice", guidance="Write tests first always",
+        item_type="convention", language="python", base_confidence=0.6,
     )
     # Simulate staleness: set last_fired 200 days ago
-    from datetime import datetime, timezone, timedelta
     stale_date = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
-    db.execute("UPDATE knowledge_items SET last_fired = ? WHERE id = ?", (stale_date, stale_id))
+    db.execute("UPDATE knowledge_items SET last_fired = ? WHERE id = ?", (stale_date, item_id))
     db.commit()
 
-    # Use a low min_confidence so the stale item (effective ≈ 0.18) still appears.
-    results = cascade_query(db, context="testing approach", language="python", min_confidence=0.1)
+    # Default min_confidence=0.2; item has base_confidence=0.6 — must appear regardless of age.
+    results = cascade_query(db, context="testing approach", language="python")
     result_ids = [r.id for r in results]
+    assert item_id in result_ids
 
-    assert fresh_id in result_ids
-    assert stale_id in result_ids
-    # Fresh item should rank higher
-    fresh_rank = result_ids.index(fresh_id)
-    stale_rank = result_ids.index(stale_id)
-    assert fresh_rank < stale_rank
+    # effective_confidence must equal base_confidence directly
+    match = next(r for r in results if r.id == item_id)
+    assert match.effective_confidence == pytest.approx(0.6)
 
 
 # --- min_confidence filter ---

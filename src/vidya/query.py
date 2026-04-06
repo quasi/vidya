@@ -2,9 +2,6 @@
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
-
-from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
 
 
 def _sanitize_fts_tokens(text: str) -> str:
@@ -67,24 +64,19 @@ def cascade_query(
 
     Algorithm:
     1. Fetch active items matching the applicable scope levels.
-    2. Compute effective_confidence = base_confidence * freshness for each.
-    3. Filter by min_confidence.
-    4. FTS5 match on context (and goal) for relevance ranking.
-    5. score = relevance * effective_confidence * scope_boost
-    6. Override suppression: if item A overrides item B, drop B.
-    7. Sort by score descending, build match_reason.
+    2. Filter by min_confidence (base_confidence used directly as effective_confidence).
+    3. FTS5 match on context (and goal) for relevance ranking.
+    4. score = relevance * effective_confidence * scope_boost
+    5. Override suppression: if item A overrides item B, drop B.
+    6. Sort by score descending, build match_reason.
     """
     # Step 1: fetch all active items in scope
     rows = _fetch_in_scope(db, language, runtime, framework, project)
 
-    now = datetime.now(timezone.utc)  # compute once for the whole query
-
-    # Step 2 + 3: compute effective_confidence, filter
+    # Step 2 + 3: filter by base_confidence directly
     candidates = []
     for row in rows:
-        days = days_since_reference(row["last_fired"], row["first_seen"], now)
-        fresh = compute_freshness(days)
-        eff = effective_confidence(row["base_confidence"], fresh)
+        eff = row["base_confidence"]
         if eff < min_confidence:
             continue
         candidates.append((dict(row), eff))

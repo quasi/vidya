@@ -8,7 +8,6 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
 
 
 def assemble_brief(
@@ -61,16 +60,12 @@ def _project_state(
     rows: list,
 ) -> dict[str, Any]:
     """Counts and distributions for the current scope."""
-    now = datetime.now(timezone.utc)
-
     high = medium = low = 0
     by_type: dict[str, int] = {}
     never_fired = 0
 
     for row in rows:
-        days = days_since_reference(row["last_fired"], row["first_seen"], now)
-        fresh = compute_freshness(days)
-        eff = effective_confidence(row["base_confidence"], fresh)
+        eff = row["base_confidence"]
 
         if eff > 0.5:
             high += 1
