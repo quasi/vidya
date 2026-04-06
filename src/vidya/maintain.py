@@ -1,7 +1,7 @@
 """Maintenance: stats and freshness computation.
 
 Phase 1: compute_stats only. Capacity eviction and drift detection are Phase 2.
-Freshness is computed at query time (not batch-updated) — see confidence.py.
+Staleness is evidence-based: never-fired, fired-long-ago, contradicted, superseded.
 """
 
 import sqlite3
@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from vidya.confidence import compute_freshness, days_since_reference, effective_confidence
 from vidya.store import archive_item
 
 
@@ -33,7 +32,6 @@ def compute_stats(
 ) -> Stats:
     """Compute knowledge base statistics, optionally filtered by language/project."""
     stats = Stats()
-    now = datetime.now(timezone.utc)
 
     # Build optional filter
     conditions = ["status = 'active'"]
@@ -47,7 +45,7 @@ def compute_stats(
     where = " AND ".join(conditions)
 
     rows = db.execute(
-        f"SELECT base_confidence, last_fired, first_seen, type, "
+        f"SELECT base_confidence, type, "
         f"language, runtime, framework, project FROM knowledge_items WHERE {where}",
         params,
     ).fetchall()
@@ -55,9 +53,7 @@ def compute_stats(
     stats.total_items = len(rows)
 
     for row in rows:
-        days = days_since_reference(row["last_fired"], row["first_seen"], now)
-        fresh = compute_freshness(days)
-        eff = effective_confidence(row["base_confidence"], fresh)
+        eff = row["base_confidence"]
 
         # Confidence band
         if eff > 0.5:
@@ -114,9 +110,13 @@ def find_stale_items(
     language: str | None = None,
     project: str | None = None,
     stale_days: int = 90,
-    min_confidence: float = 0.2,
 ) -> list[dict[str, Any]]:
-    """Find items that are stale: unfired for too long, or below confidence threshold."""
+    """Find items that are stale based on evidence:
+    - Never fired and older than stale_days
+    - Fired but last_fired older than stale_days
+    - Contradicted: fail_count > success_count
+    - Superseded but not archived
+    """
     now = datetime.now(timezone.utc)
     conditions = ["status = 'active'"]
     params: list = []
@@ -130,23 +130,34 @@ def find_stale_items(
 
     rows = db.execute(
         f"SELECT id, pattern, guidance, base_confidence, last_fired, first_seen, "
-        f"fire_count FROM knowledge_items WHERE {where}",
+        f"fire_count, fail_count, success_count, superseded_by "
+        f"FROM knowledge_items WHERE {where}",
         params,
     ).fetchall()
 
     stale: list[dict[str, Any]] = []
     for row in rows:
-        days = days_since_reference(row["last_fired"], row["first_seen"], now)
-        fresh = compute_freshness(days)
-        eff = effective_confidence(row["base_confidence"], fresh)
+        # Inline days-since-reference (days_since_reference was removed from confidence.py)
+        ref_ts = row["last_fired"] or row["first_seen"]
+        if ref_ts:
+            last = datetime.fromisoformat(ref_ts)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            days = max(0, (now - last).days)
+        else:
+            days = None
 
         reasons = []
-        if row["fire_count"] == 0 and days >= stale_days:
-            reasons.append(f"Never fired, created {int(days)} days ago")
-        elif row["fire_count"] > 0 and days >= stale_days:
-            reasons.append(f"Last fired {int(days)} days ago")
-        if eff < min_confidence:
-            reasons.append(f"Effective confidence {eff:.3f} below {min_confidence}")
+        if row["fire_count"] == 0 and days is not None and days >= stale_days:
+            reasons.append(f"Never fired, created {days} days ago")
+        elif row["fire_count"] > 0 and days is not None and days >= stale_days:
+            reasons.append(f"Last fired {days} days ago")
+        if row["fail_count"] > row["success_count"]:
+            reasons.append(
+                f"Contradicted: {row['fail_count']} failures vs {row['success_count']} successes"
+            )
+        if row["superseded_by"]:
+            reasons.append("Superseded but not archived")
 
         if reasons:
             stale.append({
@@ -154,11 +165,11 @@ def find_stale_items(
                 "pattern": row["pattern"],
                 "guidance": row["guidance"],
                 "reason": "; ".join(reasons),
-                "effective_confidence": round(eff, 3),
-                "days_since_activity": int(days),
+                "base_confidence": round(row["base_confidence"], 3),
+                "days_since_activity": days,
             })
 
-    stale.sort(key=lambda x: x["effective_confidence"])
+    stale.sort(key=lambda x: x["base_confidence"])
     return stale
 
 
@@ -169,18 +180,14 @@ def auto_archive_stale(
     dry_run: bool = True,
     archive_threshold: float = 0.1,
 ) -> dict[str, Any]:
-    """Archive items with effective confidence below archive_threshold.
+    """Archive stale items with base_confidence below archive_threshold.
 
     Args:
         dry_run: If True, report what would be archived without doing it.
-        archive_threshold: Items with effective_confidence below this get archived.
+        archive_threshold: Items with base_confidence below this get archived.
     """
-    # find_stale_items returns items stale for ANY reason (age OR low confidence).
-    # The candidates filter then narrows to those below archive_threshold.
-    # This two-step is intentional: archive_threshold (0.1) < health_report's
-    # min_confidence (0.2), so we only archive the worst items, not all stale ones.
-    stale = find_stale_items(db, language=language, project=project, min_confidence=archive_threshold)
-    candidates = [s for s in stale if s["effective_confidence"] < archive_threshold]
+    stale = find_stale_items(db, language=language, project=project)
+    candidates = [s for s in stale if s["base_confidence"] < archive_threshold]
 
     if dry_run:
         return {

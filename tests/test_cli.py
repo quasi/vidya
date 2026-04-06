@@ -3,6 +3,7 @@
 import json
 import pytest
 from click.testing import CliRunner
+from datetime import datetime, timezone, timedelta
 
 from vidya.cli import main
 from vidya.store import create_item
@@ -264,8 +265,11 @@ def test_maintain_json_includes_health(cli, db):
 
 
 def test_maintain_archive_flag_dry_run_by_default(cli, db):
-    create_item(db, pattern="weak", guidance="X", item_type="convention",
-                base_confidence=0.05, source="extraction")
+    item_id = create_item(db, pattern="weak", guidance="X", item_type="convention",
+                          base_confidence=0.05, source="extraction")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    db.execute("UPDATE knowledge_items SET first_seen = ? WHERE id = ?", (old_date, item_id))
+    db.commit()
     result = cli.invoke(main, ["--json", "maintain", "--archive"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -274,8 +278,11 @@ def test_maintain_archive_flag_dry_run_by_default(cli, db):
 
 
 def test_maintain_archive_confirm_actually_archives(cli, db):
-    create_item(db, pattern="weak", guidance="X", item_type="convention",
-                base_confidence=0.05, source="extraction")
+    item_id = create_item(db, pattern="weak", guidance="X", item_type="convention",
+                          base_confidence=0.05, source="extraction")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    db.execute("UPDATE knowledge_items SET first_seen = ? WHERE id = ?", (old_date, item_id))
+    db.commit()
     result = cli.invoke(main, ["--json", "maintain", "--archive", "--confirm"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
