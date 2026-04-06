@@ -202,8 +202,10 @@ def feedback(ctx, feedback_type, detail, language, runtime, framework, project, 
     if result:
         if result.get("merged"):
             click.echo(f"Merged into existing item: {result['item_id']}")
-        else:
+        elif result.get("item_id"):
             click.echo(f"Created new knowledge item: {result['item_id']}")
+        elif result.get("candidate_id"):
+            click.echo(f"Created extraction candidate (pending review): {result['candidate_id']}")
     else:
         click.echo("Updated existing items.")
 
