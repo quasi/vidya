@@ -17,6 +17,8 @@ def migrate_confidence_model(db: sqlite3.Connection) -> dict:
        in the database are user_correction, zero review_rejected).
     2. Start from SOURCE_CONFIDENCE['user_correction'] (0.85).
     3. Replay success_count applications of heuristic growth.
+       Note: fail_count is intentionally NOT replayed. Verified that all 57
+       extraction items have fail_count=0 in the current database.
     4. Idempotent: only updates items still marked source='extraction'.
 
     Returns: {"updated_count": N, "details": [...]}

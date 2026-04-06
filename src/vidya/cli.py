@@ -447,7 +447,7 @@ def maintain(ctx, language, project, archive, confirm):
     if report["stale_count"] > 0:
         click.echo(f"\nStale items ({report['stale_count']}):")
         for s in report["stale_items"][:10]:
-            click.echo(f"  [{s['effective_confidence']:.3f}] {s['pattern'][:60]}")
+            click.echo(f"  [{s['base_confidence']:.3f}] {s['pattern'][:60]}")
             click.echo(f"    {s['reason']}")
     if archive_result:
         if archive_result.get("archived_count", 0) > 0:
