@@ -226,6 +226,17 @@ def _handle_correction(
     return {"item_id": item_id}
 
 
+def _find_similar_candidates(
+    db: sqlite3.Connection,
+    detail: str,
+) -> list[dict[str, Any]]:
+    """Return pending candidates that overlap with this text."""
+    rows = db.execute(
+        "SELECT * FROM extraction_candidates WHERE status = 'pending'"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _create_candidate_from_unmatched(
     db: sqlite3.Connection,
     feedback_id: str,
@@ -241,7 +252,21 @@ def _create_candidate_from_unmatched(
 
     Used when confirmations or test failures have no matching item to update.
     Candidates remain 'pending' until reviewed — proliferation guard.
+    Deduplicates against existing pending candidates.
     """
+    # Check for duplicate pending candidates
+    existing = _find_similar_candidates(db, detail)
+    for candidate in existing:
+        if overlap_score(detail, candidate) >= _MERGE_THRESHOLD:
+            old_evidence = json.loads(candidate.get("evidence") or "[]")
+            old_evidence.append(feedback_id)
+            db.execute(
+                "UPDATE extraction_candidates SET evidence = ? WHERE id = ?",
+                (json.dumps(old_evidence), candidate["id"]),
+            )
+            db.commit()
+            return {"candidate_id": candidate["id"], "merged": True}
+
     resolved_type = item_type or classify_type(detail)
     candidate_id = create_candidate(
         db,

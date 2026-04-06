@@ -231,3 +231,25 @@ def test_no_feedback_signal_is_dropped(db):
                              language="python", project="vidya")
         result = extract_from_feedback(db, feedback)
         assert result is not None, f"{fb_type} was silently dropped"
+
+
+def test_duplicate_confirmation_merges_into_existing_candidate(db):
+    """Second unmatched confirmation with same text merges into existing candidate."""
+    feedback1 = _feedback(db, "user_confirmation", "Always run linting before commit",
+                          language="python", project="vidya")
+    result1 = extract_from_feedback(db, feedback1)
+    assert "candidate_id" in result1
+
+    feedback2 = _feedback(db, "user_confirmation", "Always run linting before commit",
+                          language="python", project="vidya")
+    result2 = extract_from_feedback(db, feedback2)
+    assert "candidate_id" in result2
+    assert result2.get("merged") is True
+    assert result2["candidate_id"] == result1["candidate_id"]
+
+    # Only one candidate should exist
+    count = db.execute(
+        "SELECT COUNT(*) FROM extraction_candidates WHERE status='pending' "
+        "AND guidance LIKE '%linting%'"
+    ).fetchone()[0]
+    assert count == 1
