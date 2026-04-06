@@ -1,14 +1,11 @@
-"""Tests for confidence.py — three critical paths from the implementation plan."""
+"""Tests for confidence.py — heuristic update paths and source confidence tiers."""
 
 import pytest
 
 from vidya.confidence import (
-    FRESHNESS_DECAY_RATE,
-    FRESHNESS_FLOOR,
+    SOURCE_CONFIDENCE,
     TRUST_DECAY,
     TRUST_GROWTH,
-    compute_freshness,
-    effective_confidence,
     update_on_failure,
     update_on_success,
 )
@@ -38,12 +35,10 @@ def test_success_increments_counts():
 
 
 def test_success_updates_last_fired():
-    """Firing an item sets last_fired; compute_freshness(0) will return 1.0."""
+    """Firing an item sets last_fired."""
     item = {"base_confidence": 0.3, "fire_count": 0, "success_count": 0}
     update_on_success(item)
     assert item.get("last_fired") is not None
-    # Freshness is computed dynamically — 0 days since last_fired → 1.0
-    assert compute_freshness(0) == pytest.approx(1.0)
 
 
 # --- Path 2: one failure from 0.64, recovery ---
@@ -89,53 +84,34 @@ def test_failure_updates_last_fired():
     item = {"base_confidence": 0.5, "fire_count": 0, "fail_count": 0}
     update_on_failure(item)
     assert item.get("last_fired") is not None
-    # Freshness is computed dynamically — 0 days since last_fired → 1.0
-    assert compute_freshness(0) == pytest.approx(1.0)
 
 
-# --- Path 3: freshness decay over time ---
+# --- Path 3: SOURCE_CONFIDENCE tiers ---
 
-def test_freshness_is_1_for_0_days():
-    assert compute_freshness(days_since_reference=0) == pytest.approx(1.0)
-
-
-def test_freshness_decay_after_30_days():
-    f = compute_freshness(days_since_reference=30)
-    expected = max(FRESHNESS_FLOOR, 1.0 - FRESHNESS_DECAY_RATE * 30)
-    assert f == pytest.approx(expected)
+def test_source_confidence_user_correction():
+    assert SOURCE_CONFIDENCE["user_correction"] == 0.85
 
 
-def test_freshness_decay_after_90_days():
-    f = compute_freshness(days_since_reference=90)
-    expected = max(FRESHNESS_FLOOR, 1.0 - FRESHNESS_DECAY_RATE * 90)
-    assert f == pytest.approx(expected)
+def test_source_confidence_user_confirmation():
+    assert SOURCE_CONFIDENCE["user_confirmation"] == 0.70
 
 
-def test_freshness_floor_at_140_days():
-    """140 days = 0.005 * 140 = 0.7 decay → 1.0 - 0.7 = 0.3 = FRESHNESS_FLOOR."""
-    f = compute_freshness(days_since_reference=140)
-    assert f == pytest.approx(FRESHNESS_FLOOR)
+def test_source_confidence_review_rejected():
+    assert SOURCE_CONFIDENCE["review_rejected"] == 0.65
 
 
-def test_freshness_stays_at_floor_beyond_140_days():
-    f200 = compute_freshness(days_since_reference=200)
-    assert f200 == pytest.approx(FRESHNESS_FLOOR)
+def test_source_confidence_test_outcome():
+    assert SOURCE_CONFIDENCE["test_outcome"] == 0.60
 
 
-def test_freshness_none_returns_floor():
-    """Item never fired: freshness = FRESHNESS_FLOOR."""
-    assert compute_freshness(days_since_reference=None) == pytest.approx(FRESHNESS_FLOOR)
+def test_source_confidence_seed():
+    assert SOURCE_CONFIDENCE["seed"] == 0.60
 
 
-# --- effective_confidence ---
-
-def test_effective_confidence_is_product():
-    assert effective_confidence(0.8, 0.5) == pytest.approx(0.4)
+def test_source_confidence_extraction():
+    assert SOURCE_CONFIDENCE["extraction"] == 0.40
 
 
-def test_effective_confidence_zero_base():
-    assert effective_confidence(0.0, 1.0) == pytest.approx(0.0)
-
-
-def test_effective_confidence_full_freshness():
-    assert effective_confidence(0.6, 1.0) == pytest.approx(0.6)
+def test_source_confidence_unknown_raises():
+    with pytest.raises(KeyError):
+        SOURCE_CONFIDENCE["unknown_source"]
