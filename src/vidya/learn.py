@@ -1,21 +1,25 @@
 """Feedback-driven extraction engine (Phase 1).
 
 Triggered by vidya_feedback. Three paths:
-  review_rejected / user_correction → create or merge knowledge item
-  review_accepted / user_confirmation → boost confidence on matching items
-  test_failed → decay confidence on matching items
+  user_correction → create or merge knowledge item (auto-promote, high confidence)
+  review_rejected → create or merge knowledge item (auto-promote, medium confidence)
+  review_accepted / user_confirmation → boost confidence on matching items;
+                                        if no match, create pending candidate
+  test_failed → decay confidence on matching items;
+                if no match, create pending diagnostic candidate
 """
 
 import json
 import sqlite3
 from typing import Any
 
-from vidya.confidence import update_on_success, update_on_failure
+from vidya.confidence import SOURCE_CONFIDENCE, update_on_success, update_on_failure
 from vidya.query import _sanitize_fts_tokens
 from vidya.store import create_item, create_candidate, promote_candidate, update_item
 
-# Feedback types that trigger learning
-_NEGATIVE_TYPES = frozenset({"review_rejected", "user_correction"})
+# Feedback types that trigger auto-promotion (corrections are high-quality signal)
+_CORRECTION_TYPES = frozenset({"user_correction"})
+_REJECTION_TYPES = frozenset({"review_rejected"})
 _POSITIVE_TYPES = frozenset({"review_accepted", "user_confirmation"})
 _FAILURE_TYPES = frozenset({"test_failed"})
 
@@ -44,13 +48,36 @@ def extract_from_feedback(
     framework = feedback.get("framework") or (task.get("framework") if task else None)
     runtime = feedback.get("runtime") or (task.get("runtime") if task else None)
 
-    if fb_type in _NEGATIVE_TYPES:
-        return _handle_negative(db, feedback["id"], detail, language, runtime, framework, project)
+    if fb_type in _CORRECTION_TYPES:
+        return _handle_correction(
+            db, feedback["id"], detail, language, runtime, framework, project,
+            source="user_correction",
+        )
+    if fb_type in _REJECTION_TYPES:
+        return _handle_correction(
+            db, feedback["id"], detail, language, runtime, framework, project,
+            source="review_rejected",
+        )
     if fb_type in _POSITIVE_TYPES:
-        _apply_confidence_update(db, detail, language, project, update_on_success, "success_count")
+        matched = _apply_confidence_update(
+            db, detail, language, project, update_on_success, "success_count",
+        )
+        if not matched:
+            return _create_candidate_from_unmatched(
+                db, feedback["id"], detail, language, runtime, framework, project,
+                source="user_confirmation",
+            )
         return None
     if fb_type in _FAILURE_TYPES:
-        _apply_confidence_update(db, detail, language, project, update_on_failure, "fail_count")
+        matched = _apply_confidence_update(
+            db, detail, language, project, update_on_failure, "fail_count",
+        )
+        if not matched:
+            return _create_candidate_from_unmatched(
+                db, feedback["id"], detail, language, runtime, framework, project,
+                source="test_outcome",
+                item_type="diagnostic",
+            )
         return None
     # test_passed is recorded in feedback_records but does NOT update knowledge items.
     # Passing tests are expected, not evidence of correctness.
@@ -120,10 +147,13 @@ def _apply_confidence_update(
     project: str | None,
     update_fn: Any,
     count_field: str,
-) -> None:
-    """Find similar items and apply a confidence update function to each."""
+) -> bool:
+    """Find similar items and apply a confidence update function to each.
+
+    Returns True if at least one item was matched and updated.
+    """
     similar = find_similar_items(db, detail, language, project)
-    updated = False
+    matched = False
     for item in similar:
         if overlap_score(detail, item) > 0.3:
             item_dict = dict(item)
@@ -137,12 +167,13 @@ def _apply_confidence_update(
                 fire_count=item_dict["fire_count"],
                 **{count_field: item_dict[count_field]},
             )
-            updated = True
-    if updated:
+            matched = True
+    if matched:
         db.commit()
+    return matched
 
 
-def _handle_negative(
+def _handle_correction(
     db: sqlite3.Connection,
     feedback_id: str,
     detail: str,
@@ -150,8 +181,13 @@ def _handle_negative(
     runtime: str | None,
     framework: str | None,
     project: str | None,
+    source: str,
 ) -> dict[str, Any]:
-    """Create or merge a knowledge item for negative feedback."""
+    """Create or merge a knowledge item for corrections and rejections.
+
+    Auto-promotes immediately — these are high-quality signals.
+    The source determines the initial confidence via SOURCE_CONFIDENCE.
+    """
     similar = find_similar_items(db, detail, language, project)
 
     for existing in similar:
@@ -184,10 +220,43 @@ def _handle_negative(
         project=project,
         method="feedback",
         evidence=json.dumps([feedback_id]),
-        initial_confidence=0.15,
+        initial_confidence=SOURCE_CONFIDENCE[source],
     )
-    item_id = promote_candidate(db, candidate_id)
+    item_id = promote_candidate(db, candidate_id, source=source)
     return {"item_id": item_id}
+
+
+def _create_candidate_from_unmatched(
+    db: sqlite3.Connection,
+    feedback_id: str,
+    detail: str,
+    language: str | None,
+    runtime: str | None,
+    framework: str | None,
+    project: str | None,
+    source: str,
+    item_type: str | None = None,
+) -> dict[str, Any]:
+    """Create a pending candidate (no auto-promotion) for unmatched signals.
+
+    Used when confirmations or test failures have no matching item to update.
+    Candidates remain 'pending' until reviewed — proliferation guard.
+    """
+    resolved_type = item_type or classify_type(detail)
+    candidate_id = create_candidate(
+        db,
+        pattern=_infer_pattern(detail, language, project),
+        guidance=detail,
+        item_type=resolved_type,
+        language=language,
+        runtime=runtime,
+        framework=framework,
+        project=project,
+        method="feedback",
+        evidence=json.dumps([feedback_id]),
+        initial_confidence=SOURCE_CONFIDENCE[source],
+    )
+    return {"candidate_id": candidate_id}
 
 
 def _infer_pattern(detail: str, language: str | None, project: str | None) -> str:

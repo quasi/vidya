@@ -2,6 +2,7 @@
 
 import pytest
 
+from vidya.confidence import SOURCE_CONFIDENCE
 from vidya.store import create_item, create_feedback, get_item
 from vidya.learn import extract_from_feedback
 
@@ -32,7 +33,7 @@ def test_review_rejected_sets_low_confidence(db):
     feedback = _feedback(db, "review_rejected", "Never use raw SQL", language="python")
     result = extract_from_feedback(db, feedback)
     item = get_item(db, result["item_id"])
-    assert item["base_confidence"] == pytest.approx(0.15)
+    assert item["base_confidence"] == pytest.approx(SOURCE_CONFIDENCE["review_rejected"])
 
 
 def test_user_correction_also_creates_item(db):
@@ -155,3 +156,78 @@ def test_test_passed_does_not_create_or_update_items(db):
     item = get_item(db, item_id)
     assert item["base_confidence"] == 0.5
     assert item["fire_count"] == 0
+
+
+# --- Two-tier promotion and source-based confidence ---
+
+def test_correction_creates_at_high_confidence(db):
+    """User corrections should create items at 0.85, not 0.15."""
+    feedback = _feedback(db, "user_correction", "Use uv sync not pip install",
+                         language="python", project="vidya")
+    result = extract_from_feedback(db, feedback)
+    assert result is not None
+    item = get_item(db, result["item_id"])
+    assert item["base_confidence"] == pytest.approx(SOURCE_CONFIDENCE["user_correction"])
+    assert item["source"] == "user_correction"
+
+
+def test_review_rejected_creates_at_lower_confidence(db):
+    """review_rejected items get 0.65, not 0.85."""
+    feedback = _feedback(db, "review_rejected", "Avoid global mutable state",
+                         language="python")
+    result = extract_from_feedback(db, feedback)
+    item = get_item(db, result["item_id"])
+    assert item["base_confidence"] == pytest.approx(SOURCE_CONFIDENCE["review_rejected"])
+    assert item["source"] == "review_rejected"
+
+
+def test_unmatched_confirmation_creates_candidate_not_item(db):
+    """Unmatched confirmations create pending candidates, not active items."""
+    feedback = _feedback(db, "user_confirmation", "Always run linting before commit",
+                         language="python", project="vidya")
+    result = extract_from_feedback(db, feedback)
+    assert result is not None
+    assert "candidate_id" in result
+    assert "item_id" not in result
+    candidate = db.execute("SELECT * FROM extraction_candidates WHERE id = ?",
+                           (result["candidate_id"],)).fetchone()
+    assert candidate is not None
+    assert candidate["status"] == "pending"
+    assert candidate["initial_confidence"] == pytest.approx(SOURCE_CONFIDENCE["user_confirmation"])
+
+
+def test_unmatched_failure_creates_diagnostic_candidate(db):
+    """Test failure with no match creates a diagnostic candidate."""
+    feedback = _feedback(db, "test_failed", "Integration test fails on empty database",
+                         language="python", project="vidya")
+    result = extract_from_feedback(db, feedback)
+    assert result is not None
+    assert "candidate_id" in result
+    candidate = db.execute("SELECT * FROM extraction_candidates WHERE id = ?",
+                           (result["candidate_id"],)).fetchone()
+    assert candidate["type"] == "diagnostic"
+    assert candidate["initial_confidence"] == pytest.approx(SOURCE_CONFIDENCE["test_outcome"])
+
+
+def test_matched_confirmation_boosts_no_new_item(db):
+    """Confirmation matching an existing item should boost it, not create a new one."""
+    create_item(db, pattern="run linting", guidance="Always run linting before commit",
+                item_type="convention", language="python",
+                base_confidence=0.5, source="extraction")
+    feedback = _feedback(db, "user_confirmation", "Always run linting before commit",
+                         language="python")
+    result = extract_from_feedback(db, feedback)
+    assert result is None
+
+
+def test_no_feedback_signal_is_dropped(db):
+    """Every feedback type should produce a result when no matches exist."""
+    import uuid
+    for fb_type in ["user_correction", "user_confirmation", "test_failed", "review_rejected"]:
+        # Use a fully random UUID so there is zero token overlap between iterations.
+        unique_key = uuid.uuid4().hex
+        feedback = _feedback(db, fb_type,
+                             f"{fb_type}_{unique_key}",
+                             language="python", project="vidya")
+        result = extract_from_feedback(db, feedback)
+        assert result is not None, f"{fb_type} was silently dropped"

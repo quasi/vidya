@@ -319,7 +319,11 @@ def create_candidate(
     return candidate_id
 
 
-def promote_candidate(db: sqlite3.Connection, candidate_id: str) -> str:
+def promote_candidate(
+    db: sqlite3.Connection,
+    candidate_id: str,
+    source: str = "extraction",
+) -> str:
     """Promote an extraction candidate to a knowledge item atomically."""
     row = db.execute(
         "SELECT * FROM extraction_candidates WHERE id = ?", (candidate_id,)
@@ -339,7 +343,7 @@ def promote_candidate(db: sqlite3.Connection, candidate_id: str) -> str:
             framework=row["framework"],
             project=row["project"],
             base_confidence=row["initial_confidence"],
-            source="extraction",
+            source=source,
             evidence=row["evidence"],
         )
         db.execute(
