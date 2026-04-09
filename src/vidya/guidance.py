@@ -93,6 +93,13 @@ def for_feedback(
     learning: dict[str, Any] | None,
     db: sqlite3.Connection,
 ) -> dict[str, str]:
+    if learning and learning.get("decomposed"):
+        source_count = len(learning.get("source_ids", []))
+        return {
+            "note": f"Bundle decomposed. {source_count} source items released for individual review.",
+            "next_step": "Re-run vidya feedback targeting the specific source item that needs correction.",
+        }
+
     if feedback_type in ("user_correction", "review_rejected"):
         if learning is None:
             return {
@@ -138,6 +145,8 @@ def for_query(
             "next_step": "Widen context or use different keywords. 'error handling pytest' matches better than 'I need to fix the test errors'.",
         }
 
+    bundled = [i for i in items if i.get("match_source") == "bundle"]
+
     high = [i for i in items if i.get("effective_confidence", 0) > 0.5]
     medium = [i for i in items if 0.2 <= i.get("effective_confidence", 0) <= 0.5]
 
@@ -149,13 +158,18 @@ def for_query(
             parts.append(f"{len(preconditions)} precondition{'s' if len(preconditions) != 1 else ''} — check before proceeding.")
         if anti_patterns:
             parts.append(f"{len(anti_patterns)} anti-pattern{'s' if len(anti_patterns) != 1 else ''} — avoid these.")
+        if bundled:
+            parts.append(f"{len(bundled)} result{'s' if len(bundled) != 1 else ''} compacted from bundles (multiple items synthesized into one).")
         return {
             "note": " ".join(parts),
             "next_step": "Follow HIGH items. Call vidya feedback to confirm or correct.",
         }
 
+    note = f"{len(medium)} MEDIUM-confidence item{'s' if len(medium) != 1 else ''} — treat as suggestions, not rules."
+    if bundled:
+        note += f" {len(bundled)} result{'s' if len(bundled) != 1 else ''} compacted from bundles (multiple items synthesized into one)."
     return {
-        "note": f"{len(medium)} MEDIUM-confidence item{'s' if len(medium) != 1 else ''} — treat as suggestions, not rules.",
+        "note": note,
         "next_step": "Verify these items apply to your situation. Confirm with vidya feedback if they help.",
     }
 
@@ -288,4 +302,34 @@ def for_record_step(
     return {
         "note": "Step recorded. No existing knowledge matched this action.",
         "next_step": "If this step represents a reusable pattern, consider recording it via vidya feedback.",
+    }
+
+
+def for_evolve(
+    clusters_found: int,
+    candidates_created: int,
+    pending_review: int,
+    db: sqlite3.Connection,
+) -> dict[str, str]:
+    if clusters_found == 0:
+        return {
+            "note": "No clusters found. Knowledge base may be too small or items too diverse.",
+            "next_step": "Add more knowledge items or feedback events before running evolve.",
+        }
+
+    if candidates_created > 0:
+        return {
+            "note": f"{candidates_created} bundle candidate{'s' if candidates_created != 1 else ''} created from {clusters_found} cluster{'s' if clusters_found != 1 else ''}.",
+            "next_step": "Run vidya evolve --review to approve, edit, or reject candidates.",
+        }
+
+    if pending_review > 0:
+        return {
+            "note": f"{pending_review} candidate{'s' if pending_review != 1 else ''} pending review from previous runs.",
+            "next_step": "Run vidya evolve --review to approve, edit, or reject candidates.",
+        }
+
+    return {
+        "note": f"{clusters_found} cluster{'s' if clusters_found != 1 else ''} found. No new candidates created.",
+        "next_step": "Run vidya evolve --review if candidates remain, or add more feedback to trigger new clusters.",
     }
