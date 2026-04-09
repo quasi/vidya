@@ -1,7 +1,7 @@
 ---
 name: using-vidya
 description: "Procedural learning system — captures your mistakes, user corrections, and non-obvious decisions so you don't repeat errors across sessions. Use whenever: starting any non-trivial task (to retrieve past learnings before repeating past mistakes), the user corrects your approach ('no not that', 'use X instead', 'stop doing Y'), you struggle and switch approaches (tried X, failed, switched to Y), you make a design decision between alternatives, you finish a task, or you see [Vidya knowledge] or [Vidya session brief] injected into your context. This skill makes you better over time — skip it and you repeat the same mistakes every session."
-version: 0.3.1
+version: 0.4.0
 author: quasiLabs
 type: workflow
 ---
@@ -19,6 +19,8 @@ Three hooks fire without you doing anything:
 | **SessionStart** | Every session | Runs `vidya brief` — injects knowledge base state + attention items (only if >= 3 items exist) |
 | **UserPromptSubmit** | Every prompt (> 15 chars, not `/` commands) | Runs `vidya query` with the user's prompt — injects matching knowledge as `[Vidya knowledge for this task]` |
 | **PostToolUse (Bash)** | After any failed bash command | Runs `vidya feedback --type test_failed` — but only if Vidya has relevant items that might relate to the failure |
+
+> **Note:** `vidya evolve` is manual — there is no hook for it. Run it when your knowledge base has grown significantly (check with `vidya stats`).
 
 You do NOT need to manually run `vidya query` for every prompt. The hook handles it. Run `vidya query` explicitly only when you need targeted knowledge on a specific subtopic mid-task.
 
@@ -191,6 +193,32 @@ Understand an item's history — where it came from, how many confirmations, any
 vidya explain --item-id "<id>"
 ```
 
+### vidya evolve
+
+Cluster related knowledge items and synthesize compound rules. Run periodically as your knowledge base grows (50+ items is a good starting point).
+
+```bash
+# See what would cluster (safe, read-only)
+vidya evolve --cluster-only --language python --project myproject
+
+# Full pipeline: cluster + synthesize (creates pending candidates)
+vidya evolve --language python --project myproject
+
+# Synthesize but don't persist (preview mode)
+vidya evolve --dry-run --language python
+
+# Review pending candidates interactively
+vidya evolve --review --language python --project myproject
+```
+
+**Review actions:** `[a]pprove` promotes the compound rule, `[e]dit` opens $EDITOR to refine guidance before promoting, `[r]eject` discards, `[s]kip` leaves pending, `[q]uit` exits review.
+
+**What happens on promotion:** Source items stay active and queryable. A new `bundle` item is created with synthesized guidance. In query results, bundled items are compacted — you see one result instead of N.
+
+**What happens on negative feedback:** If you correct a bundle item (`vidya feedback --type user_correction`), Vidya decomposes the bundle — source items resume individual display, and you're told which sources to re-target.
+
+**Tuning:** `--min-size` (default 3), `--overlap-threshold` (default 0.4), `--min-cohesion` (default 0.5), `--model` (default claude-haiku-4-5, override via VIDYA_EVOLVE_MODEL env var).
+
 ## Confidence Bands
 
 | Band | Threshold | What to do |
@@ -214,3 +242,5 @@ New items start at 0.15 (LOW) — need ~8 confirmations to reach HIGH. Seeded it
 | Omitting `--project` | Items lose project scope, weakening project-specific knowledge. |
 | Using only `decision` for all steps | Pick the right `--action-type` — Vidya uses these to cluster patterns. |
 | Ignoring HIGH-confidence items | They were earned. Follow them unless you have a specific reason not to. |
+| Not running `vidya evolve` as knowledge grows | 50+ items without evolution means redundant rules clutter query results |
+| Promoting candidates without reading source items | Always check what's being compacted — synthesis can lose specifics |
