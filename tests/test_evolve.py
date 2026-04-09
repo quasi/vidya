@@ -846,3 +846,213 @@ def test_query_after_decomposition_no_grouping(db):
     for r in results:
         assert r.match_source is None, "No grouping after decomposition"
         assert r.bundle_member_count is None
+
+
+# ---------------------------------------------------------------------------
+# CLI tests (Task 7): vidya evolve command
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402 (already imported above but re-import is harmless)
+from click.testing import CliRunner  # noqa: E402
+from unittest.mock import patch, MagicMock  # noqa: E402 (already imported above)
+
+from vidya.cli import main  # noqa: E402
+
+
+@pytest.fixture
+def cli_runner(db, monkeypatch):
+    """CliRunner with _db() monkeypatched to the test database."""
+    monkeypatch.setattr("vidya.cli._db", lambda: db)
+    return CliRunner()
+
+
+def _make_clusterable_items(db, count: int = 3, language: str = "python") -> list[str]:
+    """Insert items with heavy token overlap so detect_clusters finds a cluster."""
+    ids = []
+    for i in range(count):
+        iid = create_item(
+            db,
+            pattern=f"error handling python exception catch retry {i}",
+            guidance="always handle errors with try except blocks and retry logic python",
+            item_type="convention",
+            language=language,
+            project="myapp",
+            base_confidence=0.6,
+        )
+        ids.append(iid)
+    return ids
+
+
+# --- evolve --cluster-only ---
+
+def test_cli_evolve_cluster_only(cli_runner, db):
+    """evolve --cluster-only shows cluster info without calling the LLM."""
+    _make_clusterable_items(db, language="python")
+    result = cli_runner.invoke(
+        main,
+        ["evolve", "--cluster-only", "--language", "python", "--project", "myapp",
+         "--min-size", "3", "--overlap-threshold", "0.4", "--min-cohesion", "0.5"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "cluster" in result.output.lower()
+
+
+def test_cli_evolve_cluster_only_json(cli_runner, db):
+    """evolve --cluster-only --json returns valid JSON with clusters key."""
+    _make_clusterable_items(db, language="python")
+    result = cli_runner.invoke(
+        main,
+        ["--json", "evolve", "--cluster-only", "--language", "python", "--project", "myapp",
+         "--min-size", "3", "--overlap-threshold", "0.4", "--min-cohesion", "0.5"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "clusters" in data
+    assert isinstance(data["clusters"], list)
+    assert len(data["clusters"]) >= 1
+    cluster = data["clusters"][0]
+    assert "item_ids" in cluster
+    assert "cohesion" in cluster
+    assert "theme_tokens" in cluster
+
+
+# --- evolve no clusters ---
+
+def test_cli_evolve_no_clusters(cli_runner, db):
+    """When no clusters are found, output says so."""
+    result = cli_runner.invoke(
+        main,
+        ["evolve", "--language", "python"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no clusters" in result.output.lower()
+
+
+def test_cli_evolve_no_clusters_json(cli_runner, db):
+    """When no clusters found in JSON mode, returns JSON with empty clusters key."""
+    result = cli_runner.invoke(
+        main,
+        ["--json", "evolve", "--language", "python"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "clusters" in data or "message" in data
+
+
+# --- evolve full pipeline (mocked LLM) ---
+
+def _mock_llm_response(pattern="compound pattern", guidance="compound guidance text here"):
+    mock_resp = MagicMock()
+    mock_resp.choices[0].message.content = json.dumps(
+        {"pattern": pattern, "guidance": guidance}
+    )
+    return mock_resp
+
+
+def test_cli_evolve_full_pipeline(cli_runner, db):
+    """Full pipeline creates evolution candidate and displays it."""
+    _make_clusterable_items(db, language="python")
+    with patch("litellm.completion", return_value=_mock_llm_response()):
+        result = cli_runner.invoke(
+            main,
+            ["evolve", "--language", "python", "--project", "myapp",
+             "--min-size", "3", "--overlap-threshold", "0.4", "--min-cohesion", "0.5",
+             "--model", "test-model"],
+        )
+    assert result.exit_code == 0, result.output
+    # Should mention candidate or synthesized
+    assert "candidate" in result.output.lower() or "pattern" in result.output.lower()
+
+
+def test_cli_evolve_dry_run(cli_runner, db):
+    """--dry-run synthesizes but deletes candidate from DB."""
+    _make_clusterable_items(db, language="python")
+    with patch("litellm.completion", return_value=_mock_llm_response()):
+        result = cli_runner.invoke(
+            main,
+            ["evolve", "--dry-run", "--language", "python", "--project", "myapp",
+             "--min-size", "3", "--overlap-threshold", "0.4", "--min-cohesion", "0.5",
+             "--model", "test-model"],
+        )
+    assert result.exit_code == 0, result.output
+    # Candidate should be deleted (dry-run)
+    row = db.execute("SELECT COUNT(*) as n FROM evolution_candidates").fetchone()
+    assert row["n"] == 0, "Dry-run should leave no candidates in DB"
+
+
+# --- evolve --review ---
+
+def test_cli_evolve_review_json(cli_runner, db):
+    """--review --json returns JSON array of pending evolution candidates."""
+    source_ids = _make_source_items(db, count=3)
+    _insert_evolution_candidate(db, "cand-review-1", source_ids,
+                                pattern="test compound pattern",
+                                guidance="test compound guidance")
+
+    result = cli_runner.invoke(
+        main,
+        ["--json", "evolve", "--review"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert isinstance(data, list)
+    assert len(data) == 1
+    cand = data[0]
+    assert cand["id"] == "cand-review-1"
+    assert "pattern" in cand
+    assert "guidance" in cand
+    assert "source_items" in cand
+    assert "cohesion" in cand
+    assert "theme" in cand
+
+
+def test_cli_evolve_review_json_empty(cli_runner, db):
+    """--review --json returns empty list when no pending candidates."""
+    result = cli_runner.invoke(
+        main,
+        ["--json", "evolve", "--review"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data == []
+
+
+# --- feedback decompose ---
+
+def test_cli_feedback_decompose(cli_runner, db):
+    """feedback command displays decomposition message when bundle is decomposed."""
+    # Create source items with high token overlap
+    shared_text = "always use async await coroutines in django views python"
+    source_ids = []
+    for i in range(3):
+        sid = create_item(
+            db,
+            pattern=f"async django pattern {i}",
+            guidance=shared_text,
+            item_type="convention",
+            language="python",
+            project="myapp",
+        )
+        source_ids.append(sid)
+
+    # Promote a candidate to create a bundle
+    _insert_evolution_candidate(
+        db, "cand-cli-fb", source_ids,
+        pattern="async django await pattern",
+        guidance=shared_text,
+        scope_language="python",
+        scope_project="myapp",
+    )
+    bundle_id = promote_candidate(db, "cand-cli-fb")
+
+    # Submit feedback that overlaps with the bundle → triggers decomposition
+    result = cli_runner.invoke(
+        main,
+        ["feedback",
+         "--type", "user_correction",
+         "--detail", shared_text,
+         "--language", "python",
+         "--project", "myapp"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "decomposed" in result.output.lower() or "bundle" in result.output.lower()

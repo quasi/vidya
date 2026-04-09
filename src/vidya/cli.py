@@ -19,6 +19,11 @@ from vidya.guidance import (
     for_start_task, for_end_task, for_record_step,
     for_query, for_feedback, for_explain, for_stats, for_maintain,
 )
+from vidya.evolve import (
+    detect_clusters, synthesize_cluster,
+    promote_candidate as promote_evolution_candidate,
+    reject_candidate,
+)
 
 
 _DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
@@ -200,7 +205,12 @@ def feedback(ctx, feedback_type, detail, language, runtime, framework, project, 
         click.echo(json.dumps(payload))
         return
     if result:
-        if result.get("merged"):
+        if result.get("decomposed"):
+            click.echo(f"Bundle {result['bundle_id']} decomposed. Source items released:")
+            for sid in result.get("source_ids", []):
+                click.echo(f"  - {sid}")
+            click.echo("Re-run feedback to target a specific source item.")
+        elif result.get("merged"):
             click.echo(f"Merged into existing item: {result['item_id']}")
         elif result.get("item_id"):
             click.echo(f"Created new knowledge item: {result['item_id']}")
@@ -457,3 +467,215 @@ def maintain(ctx, language, project, archive, confirm):
         elif archive_result.get("would_archive_count", 0) > 0:
             click.echo(f"\nWould archive {archive_result['would_archive_count']} item(s). "
                        f"Use --confirm to execute.")
+
+
+@main.command()
+@click.option("--language", default=None, help="Scope filter: language.")
+@click.option("--framework", default=None, help="Scope filter: framework.")
+@click.option("--project", default=None, help="Scope filter: project.")
+@click.option("--cluster-only", is_flag=True, default=False,
+              help="Show clusters without synthesis.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Synthesize but do not persist candidates.")
+@click.option("--review", is_flag=True, default=False,
+              help="Interactive review of pending candidates.")
+@click.option("--model", default=None, help="Override LLM model for synthesis.")
+@click.option("--min-size", default=3, type=int, show_default=True,
+              help="Minimum cluster size.")
+@click.option("--overlap-threshold", default=0.4, type=float, show_default=True,
+              help="Minimum pairwise token overlap to connect items.")
+@click.option("--min-cohesion", default=0.5, type=float, show_default=True,
+              help="Minimum average pairwise overlap to accept a cluster.")
+@click.pass_context
+def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
+           model, min_size, overlap_threshold, min_cohesion):
+    """Detect knowledge clusters and synthesize compound rules."""
+    use_json = ctx.obj.get("json")
+    db = _db()
+
+    # --- --review mode ---
+    if review:
+        rows = db.execute(
+            "SELECT * FROM evolution_candidates WHERE status = 'pending' ORDER BY timestamp"
+        ).fetchall()
+
+        if use_json:
+            output = []
+            for row in rows:
+                r = dict(row)
+                source_item_ids = json.loads(r.get("source_item_ids") or "[]")
+                source_items = []
+                for iid in source_item_ids:
+                    item = get_item(db, iid)
+                    if item:
+                        source_items.append({
+                            "id": iid,
+                            "pattern": item.get("pattern"),
+                            "guidance": item.get("guidance"),
+                            "base_confidence": item.get("base_confidence"),
+                        })
+                output.append({
+                    "id": r["id"],
+                    "pattern": r["pattern"],
+                    "guidance": r["guidance"],
+                    "source_items": source_items,
+                    "cohesion": r["cohesion_score"],
+                    "theme": r["cluster_theme"],
+                })
+            click.echo(json.dumps(output))
+            return
+
+        if not rows:
+            click.echo("No pending candidates to review.")
+            return
+
+        total = len(rows)
+        for idx, row in enumerate(rows, start=1):
+            r = dict(row)
+            source_item_ids = json.loads(r.get("source_item_ids") or "[]")
+            source_items = []
+            for iid in source_item_ids:
+                item = get_item(db, iid)
+                if item:
+                    source_items.append(item)
+
+            click.echo(f"\nCandidate {idx} of {total} "
+                       f"[cohesion: {r['cohesion_score']:.2f}, "
+                       f"{len(source_item_ids)} source items]")
+            click.echo(f"Theme: {r['cluster_theme']}")
+            click.echo(f"\nSynthesized rule:")
+            click.echo(f"  Pattern:  {r['pattern']}")
+            click.echo(f"  Guidance: {r['guidance']}")
+            if r.get("review_notes"):
+                click.echo(f"  Note: {r['review_notes']}")
+            click.echo(f"\nSource items:")
+            for i, item in enumerate(source_items, start=1):
+                conf = item.get("base_confidence", 0.0)
+                click.echo(f"  {i}. [{conf:.2f}] {item.get('pattern', '')}")
+
+            while True:
+                action = click.prompt(
+                    "\nAction: [a]pprove  [e]dit  [r]eject  [s]kip  [q]uit",
+                    default="s",
+                ).strip().lower()
+
+                if action == "a":
+                    bundle_id = promote_evolution_candidate(db, r["id"])
+                    click.echo(f"Approved — bundle created: {bundle_id}")
+                    break
+                elif action == "e":
+                    edited_text = click.edit(r["guidance"])
+                    if edited_text and edited_text.strip():
+                        bundle_id = promote_evolution_candidate(
+                            db, r["id"], edited_guidance=edited_text.strip()
+                        )
+                        click.echo(f"Approved with edits — bundle created: {bundle_id}")
+                    else:
+                        click.echo("No changes; skipping.")
+                    break
+                elif action == "r":
+                    reject_candidate(db, r["id"])
+                    click.echo("Rejected.")
+                    break
+                elif action == "s":
+                    click.echo("Skipped.")
+                    break
+                elif action == "q":
+                    click.echo("Review stopped.")
+                    return
+                else:
+                    click.echo("Unknown action. Use a/e/r/s/q.")
+        return
+
+    # --- Detect clusters ---
+    clusters = detect_clusters(
+        db,
+        language=language,
+        framework=framework,
+        project=project,
+        min_size=min_size,
+        overlap_threshold=overlap_threshold,
+        min_cohesion=min_cohesion,
+    )
+
+    if not clusters:
+        if use_json:
+            click.echo(json.dumps({"clusters": [], "message": "No clusters found."}))
+        else:
+            click.echo("No clusters found.")
+        return
+
+    # --- --cluster-only mode ---
+    if cluster_only:
+        if use_json:
+            click.echo(json.dumps({
+                "clusters": [
+                    {
+                        "item_ids": c.item_ids,
+                        "scope": c.scope,
+                        "cohesion": round(c.cohesion, 4),
+                        "theme_tokens": c.theme_tokens,
+                        "size": len(c.item_ids),
+                    }
+                    for c in clusters
+                ]
+            }))
+        else:
+            click.echo(f"Found {len(clusters)} cluster(s).")
+            for i, c in enumerate(clusters, start=1):
+                click.echo(f"\nCluster {i}: {len(c.item_ids)} item(s), "
+                           f"cohesion={c.cohesion:.2f}")
+                click.echo(f"  Scope:  {c.scope}")
+                click.echo(f"  Theme:  {' '.join(c.theme_tokens)}")
+                for iid in c.item_ids:
+                    item = get_item(db, iid)
+                    if item:
+                        click.echo(f"  - {item.get('pattern', iid)}")
+        return
+
+    # --- Full pipeline (or dry-run) ---
+    created = []
+    for cluster in clusters:
+        items = [get_item(db, iid) for iid in cluster.item_ids]
+        items = [it for it in items if it]
+        candidate = synthesize_cluster(cluster, items, db, model=model)
+        if candidate is None:
+            continue
+        if dry_run:
+            db.execute(
+                "DELETE FROM evolution_candidates WHERE id = ?", (candidate.id,)
+            )
+            db.commit()
+        created.append(candidate)
+
+    if use_json:
+        click.echo(json.dumps({
+            "dry_run": dry_run,
+            "candidates": [
+                {
+                    "id": c.id,
+                    "pattern": c.pattern,
+                    "guidance": c.guidance,
+                    "cluster_theme": c.cluster_theme,
+                    "cohesion_score": round(c.cohesion_score, 4),
+                    "source_item_ids": c.source_item_ids,
+                    "review_notes": c.review_notes,
+                }
+                for c in created
+            ],
+        }))
+        return
+
+    if not created:
+        click.echo("Clusters found but synthesis failed for all.")
+        return
+
+    tag = "[dry-run] " if dry_run else ""
+    for candidate in created:
+        click.echo(f"\n{tag}Candidate synthesized:")
+        click.echo(f"  Pattern:  {candidate.pattern}")
+        click.echo(f"  Guidance: {candidate.guidance}")
+        click.echo(f"  Theme:    {candidate.cluster_theme}")
+        click.echo(f"  Cohesion: {candidate.cohesion_score:.2f}")
+        if not dry_run:
+            click.echo(f"  ID:       {candidate.id}")
