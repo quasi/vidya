@@ -9,7 +9,7 @@ import json
 import sqlite3
 import string
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import combinations
 from typing import Any
 
@@ -66,7 +66,9 @@ def detect_clusters(
         List of Cluster dataclasses, one per accepted component.
     """
     # --- 1. Query active items matching the scope filter ---
-    conditions = ["status = 'active'"]
+    # Exclude bundle items — they share vocabulary with their sources and
+    # would inflate cohesion / create re-clustering noise.
+    conditions = ["status = 'active'", "type != 'bundle'"]
     params: list[Any] = []
 
     if language is not None:
@@ -261,8 +263,10 @@ def promote_candidate(
 
 def reject_candidate(db: sqlite3.Connection, candidate_id: str) -> None:
     """Mark an evolution candidate as rejected. Source items are not modified."""
-    db.execute(
+    cursor = db.execute(
         "UPDATE evolution_candidates SET status = 'rejected' WHERE id = ?",
         (candidate_id,),
     )
+    if cursor.rowcount == 0:
+        raise KeyError(f"Evolution candidate not found: {candidate_id}")
     db.commit()
