@@ -209,43 +209,22 @@ CREATE TABLE IF NOT EXISTS evolution_candidates (
 """
 
 
-_EVOLUTION_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS evolution_candidates (
-    id TEXT PRIMARY KEY,
-    timestamp TEXT NOT NULL,
-    pattern TEXT NOT NULL,
-    guidance TEXT NOT NULL,
-    source_item_ids TEXT NOT NULL,
-    scope_language TEXT,
-    scope_framework TEXT,
-    scope_project TEXT,
-    cluster_theme TEXT NOT NULL,
-    cohesion_score REAL NOT NULL,
-    synthesis_model TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    review_notes TEXT
-);
-"""
-
-_EVOLUTION_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS idx_bundle_id ON knowledge_items(bundle_id)"
-)
-
-
 def migrate_add_evolution(conn: sqlite3.Connection) -> None:
     """Idempotent migration: add bundle_id column and create evolution_candidates table.
 
     Safe to call on both fresh and existing databases.
+    Uses the same DDL as init_db — CREATE TABLE/INDEX IF NOT EXISTS is safe to re-run.
     """
     try:
         conn.execute("ALTER TABLE knowledge_items ADD COLUMN bundle_id TEXT")
         conn.commit()
-    except Exception:
-        # Column already exists — sqlite3 raises OperationalError
+    except sqlite3.OperationalError:
+        # Column already exists
         pass
 
-    conn.executescript(_EVOLUTION_TABLE_DDL)
-    conn.execute(_EVOLUTION_INDEX_DDL)
+    # Re-run the full DDL — all statements use IF NOT EXISTS, so this is safe
+    # on both fresh (already has everything) and old (missing evolution tables) DBs.
+    conn.executescript(_DDL)
     conn.commit()
 
 
