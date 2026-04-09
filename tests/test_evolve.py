@@ -467,13 +467,10 @@ def test_reject_leaves_sources_unchanged(db):
 from unittest.mock import patch, MagicMock  # noqa: E402
 
 from vidya.evolve import synthesize_cluster, EvolutionCandidate  # noqa: E402
-from vidya.store import create_item  # noqa: E402 (already imported above, but re-import is fine)
 
 
 def _make_cluster_with_items(db, count: int = 3) -> tuple:
     """Create `count` items and return (cluster, items_list)."""
-    from vidya.evolve import Cluster
-
     ids = []
     items = []
     for i in range(count):
@@ -504,7 +501,6 @@ def _make_cluster_with_items(db, count: int = 3) -> tuple:
 
 def _mock_litellm_response(pattern: str, guidance: str) -> MagicMock:
     """Build a MagicMock that mimics a litellm completion response."""
-    import json
     mock_response = MagicMock()
     mock_response.choices[0].message.content = json.dumps(
         {"pattern": pattern, "guidance": guidance}
@@ -584,8 +580,6 @@ def test_synthesize_short_output_flagged(db):
 
 def test_synthesize_json_retry(db):
     """First call returns invalid JSON; second call returns valid JSON; result succeeds."""
-    import json as _json
-
     cluster, items = _make_cluster_with_items(db)
     synth_guidance = (
         "always await coroutine calls in async context using async def pattern"

@@ -387,27 +387,10 @@ def synthesize_cluster(
             logger.warning("LLM call failed for synthesize_cluster: %s", exc)
             return None  # Unrecoverable
 
-    # First attempt
+    # First attempt; retry once with explicit JSON reminder on failure
     parsed = _call_llm(user_content)
-
     if parsed is None:
-        # Check whether it was a JSON failure (litellm would have been called)
-        # or an LLM error (litellm raised).  We distinguish by trying once more
-        # with a parse-error suffix — but only when the LLM itself did not fail.
-        # Re-attempt with retry suffix:
-        retry_content = user_content + "\n\nrespond with valid JSON only"
-        try:
-            response = litellm.completion(
-                model=actual_model,
-                messages=[system_msg, {"role": "user", "content": retry_content}],
-                response_format={"type": "json_object"},
-            )
-            raw = response.choices[0].message.content
-            parsed = json.loads(raw)
-        except Exception as exc:
-            logger.warning("LLM retry failed for synthesize_cluster: %s", exc)
-            return None
-
+        parsed = _call_llm(user_content + "\n\nrespond with valid JSON only")
     if parsed is None:
         return None
 
