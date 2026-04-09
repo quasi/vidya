@@ -1333,6 +1333,14 @@ def test_evolution_lifecycle_end_to_end(db):
     assert decomp_result.get("bundle_id") == error_bundle_id
     assert set(decomp_result.get("source_ids", [])) == set(error_group_ids)
 
+    # Verify the bundle is actually superseded in the DB
+    bundle_row = db.execute(
+        "SELECT status FROM knowledge_items WHERE id = ?", (error_bundle_id,)
+    ).fetchone()
+    assert bundle_row["status"] == "superseded", (
+        f"Bundle should be superseded, got: {bundle_row['status']}"
+    )
+
     # ------------------------------------------------------------------ #
     # Step 7: cascade_query again — items returned individually, no bundle grouping
     # ------------------------------------------------------------------ #
