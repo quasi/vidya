@@ -6,12 +6,18 @@ functions to promote or reject evolution candidates.
 """
 
 import json
+import logging
+import os
 import sqlite3
 import string
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from itertools import combinations
 from typing import Any
+from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -270,3 +276,183 @@ def reject_candidate(db: sqlite3.Connection, candidate_id: str) -> None:
     if cursor.rowcount == 0:
         raise KeyError(f"Evolution candidate not found: {candidate_id}")
     db.commit()
+
+
+def decompose_bundle(
+    db: sqlite3.Connection,
+    bundle_id: str,
+) -> list[str]:
+    """Reverse a bundle promotion: clear bundle_id on sources and supersede the bundle.
+
+    1. Reads the bundle item to get its related_items (source IDs).
+    2. Clears bundle_id = NULL on each source item via raw SQL.
+    3. Sets the bundle item to status = 'superseded'.
+    4. Commits.
+
+    Returns the list of source item IDs that were un-bundled.
+    """
+    from vidya.store import get_item, update_item  # local import avoids circular deps
+
+    bundle = get_item(db, bundle_id)
+    source_ids: list[str] = json.loads(bundle.get("related_items") or "[]")
+
+    # Clear bundle_id on all source items. Raw SQL is used because update_item
+    # would need bundle_id=None which passes None as a Python value — that works
+    # fine in SQLite, but using a targeted WHERE clause is clearer intent.
+    db.execute(
+        "UPDATE knowledge_items SET bundle_id = NULL WHERE bundle_id = ?",
+        (bundle_id,),
+    )
+
+    # Supersede the bundle item
+    update_item(db, bundle_id, status="superseded", _commit=False)
+
+    db.commit()
+    return source_ids
+
+
+# ---------------------------------------------------------------------------
+# Compound Synthesis
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EvolutionCandidate:
+    """A synthesized candidate rule produced from a cluster of related items."""
+
+    id: str
+    pattern: str
+    guidance: str
+    source_item_ids: list[str]
+    cluster_theme: str
+    cohesion_score: float
+    review_notes: str | None = None
+
+
+def synthesize_cluster(
+    cluster: Cluster,
+    items: list[dict],
+    db: sqlite3.Connection,
+    model: str | None = None,
+) -> "EvolutionCandidate | None":
+    """Synthesize a compound rule from a cluster of related knowledge items.
+
+    Calls an LLM to compress the cluster into one canonical rule, persists it
+    as a pending evolution candidate, and returns the candidate dataclass.
+
+    Args:
+        cluster: The Cluster describing scope, cohesion, and member IDs.
+        items: List of dicts with at least 'pattern' and 'guidance' keys,
+               in the same order as cluster.item_ids (or a superset).
+        db: Open SQLite connection with the Vidya schema.
+        model: LLM model string.  Falls back to VIDYA_EVOLVE_MODEL env var,
+               then to 'claude-haiku-4-5'.
+
+    Returns:
+        EvolutionCandidate on success, None on unrecoverable failure.
+    """
+    import litellm  # local import — optional dependency
+
+    actual_model = model or os.environ.get("VIDYA_EVOLVE_MODEL") or "claude-haiku-4-5"
+
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a technical knowledge compiler. "
+            "Given related rules, produce ONE compound rule. "
+            "Preserve every concrete detail (flag names, function names, error messages). "
+            "Do not generalize away specifics. "
+            'Output JSON: {"pattern": "max 15 words", "guidance": "compound rule, imperative voice"}'
+        ),
+    }
+
+    # Build numbered list of source items
+    source_lines = []
+    for i, item in enumerate(items, start=1):
+        source_lines.append(f"{i}. Pattern: {item['pattern']}\n   Guidance: {item['guidance']}")
+    user_content = "\n".join(source_lines)
+
+    def _call_llm(user_text: str) -> dict | None:
+        user_msg = {"role": "user", "content": user_text}
+        try:
+            response = litellm.completion(
+                model=actual_model,
+                messages=[system_msg, user_msg],
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None  # Caller handles retry
+        except Exception as exc:
+            logger.warning("LLM call failed for synthesize_cluster: %s", exc)
+            return None  # Unrecoverable
+
+    # First attempt
+    parsed = _call_llm(user_content)
+
+    if parsed is None:
+        # Check whether it was a JSON failure (litellm would have been called)
+        # or an LLM error (litellm raised).  We distinguish by trying once more
+        # with a parse-error suffix — but only when the LLM itself did not fail.
+        # Re-attempt with retry suffix:
+        retry_content = user_content + "\n\nrespond with valid JSON only"
+        try:
+            response = litellm.completion(
+                model=actual_model,
+                messages=[system_msg, {"role": "user", "content": retry_content}],
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content
+            parsed = json.loads(raw)
+        except Exception as exc:
+            logger.warning("LLM retry failed for synthesize_cluster: %s", exc)
+            return None
+
+    if parsed is None:
+        return None
+
+    synth_pattern: str = parsed.get("pattern", "")
+    synth_guidance: str = parsed.get("guidance", "")
+
+    # Quality check: warn if synthesized guidance is shorter than shortest source
+    source_word_counts = [len(item["guidance"].split()) for item in items]
+    shortest_source = min(source_word_counts) if source_word_counts else 0
+    synth_word_count = len(synth_guidance.split())
+
+    review_notes: str | None = None
+    if synth_word_count < shortest_source:
+        review_notes = "Synthesized guidance shorter than shortest source"
+
+    # Persist to DB
+    candidate_id = str(uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    theme_str = ", ".join(cluster.theme_tokens)
+    scope = cluster.scope
+    scope_language = scope.get("language")
+    scope_framework = scope.get("framework")
+    scope_project = scope.get("project")
+
+    db.execute(
+        "INSERT INTO evolution_candidates "
+        "(id, timestamp, pattern, guidance, source_item_ids, "
+        "scope_language, scope_framework, scope_project, "
+        "cluster_theme, cohesion_score, synthesis_model, status, review_notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+        (
+            candidate_id, timestamp, synth_pattern, synth_guidance,
+            json.dumps(cluster.item_ids),
+            scope_language, scope_framework, scope_project,
+            theme_str, cluster.cohesion, actual_model, review_notes,
+        ),
+    )
+    db.commit()
+
+    return EvolutionCandidate(
+        id=candidate_id,
+        pattern=synth_pattern,
+        guidance=synth_guidance,
+        source_item_ids=cluster.item_ids,
+        cluster_theme=theme_str,
+        cohesion_score=cluster.cohesion,
+        review_notes=review_notes,
+    )

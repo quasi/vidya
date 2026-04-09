@@ -458,3 +458,397 @@ def test_reject_leaves_sources_unchanged(db):
             "SELECT bundle_id FROM knowledge_items WHERE id = ?", (sid,)
         ).fetchone()
         assert row["bundle_id"] is None, f"Source {sid} was unexpectedly modified"
+
+
+# ---------------------------------------------------------------------------
+# Compound Synthesis tests (Task 3): synthesize_cluster
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch, MagicMock  # noqa: E402
+
+from vidya.evolve import synthesize_cluster, EvolutionCandidate  # noqa: E402
+from vidya.store import create_item  # noqa: E402 (already imported above, but re-import is fine)
+
+
+def _make_cluster_with_items(db, count: int = 3) -> tuple:
+    """Create `count` items and return (cluster, items_list)."""
+    from vidya.evolve import Cluster
+
+    ids = []
+    items = []
+    for i in range(count):
+        iid = create_item(
+            db,
+            pattern=f"use async pattern {i}",
+            guidance=f"always await coroutine calls in async context pattern {i}",
+            item_type="convention",
+            language="python",
+            framework="django",
+            project="webapp",
+        )
+        ids.append(iid)
+        items.append({
+            "id": iid,
+            "pattern": f"use async pattern {i}",
+            "guidance": f"always await coroutine calls in async context pattern {i}",
+        })
+
+    cluster = Cluster(
+        item_ids=ids,
+        scope={"language": "python", "framework": "django", "project": "webapp"},
+        cohesion=0.75,
+        theme_tokens=["async", "pattern"],
+    )
+    return cluster, items
+
+
+def _mock_litellm_response(pattern: str, guidance: str) -> MagicMock:
+    """Build a MagicMock that mimics a litellm completion response."""
+    import json
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = json.dumps(
+        {"pattern": pattern, "guidance": guidance}
+    )
+    return mock_response
+
+
+def test_synthesize_happy_path(db):
+    """synthesize_cluster creates a pending evolution_candidate in DB with correct fields."""
+    cluster, items = _make_cluster_with_items(db)
+    synth_pattern = "use async await in django"
+    synth_guidance = (
+        "always await coroutine calls in async context; "
+        "use async def views and async orm in django"
+    )
+    mock_resp = _mock_litellm_response(synth_pattern, synth_guidance)
+
+    with patch("litellm.completion", return_value=mock_resp) as mock_call:
+        result = synthesize_cluster(cluster, items, db, model="test-model")
+
+    assert result is not None
+    assert isinstance(result, EvolutionCandidate)
+    assert result.pattern == synth_pattern
+    assert result.guidance == synth_guidance
+    assert result.cluster_theme == "async, pattern"
+    assert result.cohesion_score == 0.75
+    assert set(result.source_item_ids) == set(cluster.item_ids)
+
+    # Verify DB row
+    row = db.execute(
+        "SELECT * FROM evolution_candidates WHERE id = ?", (result.id,)
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["synthesis_model"] == "test-model"
+    assert row["scope_language"] == "python"
+    assert row["scope_framework"] == "django"
+    assert row["scope_project"] == "webapp"
+    assert json.loads(row["source_item_ids"]) == cluster.item_ids
+
+    mock_call.assert_called_once()
+
+
+def test_synthesize_llm_unavailable(db):
+    """When litellm.completion raises, synthesize_cluster returns None and inserts nothing."""
+    cluster, items = _make_cluster_with_items(db)
+
+    with patch("litellm.completion", side_effect=Exception("connection refused")):
+        result = synthesize_cluster(cluster, items, db)
+
+    assert result is None
+
+    rows = db.execute("SELECT COUNT(*) as n FROM evolution_candidates").fetchone()
+    assert rows["n"] == 0
+
+
+def test_synthesize_short_output_flagged(db):
+    """Guidance shorter than shortest source item's guidance triggers review_notes warning."""
+    cluster, items = _make_cluster_with_items(db)
+    # Very short guidance — fewer words than any source item
+    mock_resp = _mock_litellm_response("use async", "await calls")
+
+    with patch("litellm.completion", return_value=mock_resp):
+        result = synthesize_cluster(cluster, items, db)
+
+    assert result is not None
+    assert result.review_notes is not None
+    assert "shorter than shortest source" in result.review_notes
+
+    # DB row should also have the review_notes set
+    row = db.execute(
+        "SELECT review_notes FROM evolution_candidates WHERE id = ?", (result.id,)
+    ).fetchone()
+    assert row["review_notes"] is not None
+    assert "shorter than shortest source" in row["review_notes"]
+
+
+def test_synthesize_json_retry(db):
+    """First call returns invalid JSON; second call returns valid JSON; result succeeds."""
+    import json as _json
+
+    cluster, items = _make_cluster_with_items(db)
+    synth_guidance = (
+        "always await coroutine calls in async context using async def pattern"
+    )
+
+    bad_response = MagicMock()
+    bad_response.choices[0].message.content = "not valid json {"
+
+    good_response = _mock_litellm_response("use async safely", synth_guidance)
+
+    with patch("litellm.completion", side_effect=[bad_response, good_response]) as mock_call:
+        result = synthesize_cluster(cluster, items, db)
+
+    assert result is not None
+    assert result.pattern == "use async safely"
+    assert mock_call.call_count == 2
+
+    # The second call should include the retry suffix
+    second_call_messages = mock_call.call_args_list[1][1]["messages"]
+    user_content = second_call_messages[-1]["content"]
+    assert "respond with valid JSON only" in user_content
+
+
+# ---------------------------------------------------------------------------
+# Decomposition tests (Task 5): decompose_bundle
+# ---------------------------------------------------------------------------
+
+from vidya.evolve import decompose_bundle  # noqa: E402
+
+
+def _setup_promoted_bundle(db) -> tuple[str, list[str]]:
+    """Create source items + evolution candidate, promote, return (bundle_id, source_ids)."""
+    source_ids = _make_source_items(db, count=3)
+    _insert_evolution_candidate(db, "cand-decomp", source_ids)
+    bundle_id = promote_candidate(db, "cand-decomp")
+    return bundle_id, source_ids
+
+
+def test_decompose_clears_bundle_id(db):
+    """After decompose_bundle, all source items have bundle_id = NULL."""
+    bundle_id, source_ids = _setup_promoted_bundle(db)
+
+    # Verify sources are tagged before decomposition
+    for sid in source_ids:
+        row = db.execute("SELECT bundle_id FROM knowledge_items WHERE id = ?", (sid,)).fetchone()
+        assert row["bundle_id"] == bundle_id, f"Precondition: {sid} should have bundle_id set"
+
+    decompose_bundle(db, bundle_id)
+
+    for sid in source_ids:
+        row = db.execute("SELECT bundle_id FROM knowledge_items WHERE id = ?", (sid,)).fetchone()
+        assert row["bundle_id"] is None, f"Source {sid} still has bundle_id after decomposition"
+
+
+def test_decompose_supersedes_bundle(db):
+    """After decompose_bundle, the bundle item has status = 'superseded'."""
+    bundle_id, _ = _setup_promoted_bundle(db)
+
+    decompose_bundle(db, bundle_id)
+
+    row = db.execute("SELECT status FROM knowledge_items WHERE id = ?", (bundle_id,)).fetchone()
+    assert row["status"] == "superseded"
+
+
+def test_decompose_returns_source_ids(db):
+    """decompose_bundle returns the list of source item IDs stored in related_items."""
+    bundle_id, source_ids = _setup_promoted_bundle(db)
+
+    returned = decompose_bundle(db, bundle_id)
+
+    assert set(returned) == set(source_ids)
+    assert len(returned) == len(source_ids)
+
+
+# ---------------------------------------------------------------------------
+# learn.py integration test (Task 5): feedback on bundle triggers decomposition
+# ---------------------------------------------------------------------------
+
+from vidya.learn import extract_from_feedback  # noqa: E402
+
+
+def _make_feedback_record(fb_id: str, detail: str, language: str = "python") -> dict:
+    """Minimal feedback dict for extract_from_feedback."""
+    return {
+        "id": fb_id,
+        "feedback_type": "user_correction",
+        "detail": detail,
+        "language": language,
+        "project": "myapp",
+        "framework": None,
+        "runtime": None,
+    }
+
+
+def test_feedback_on_bundle_triggers_decomposition(db):
+    """When a correction matches a bundle item, decompose_bundle is called.
+
+    Result must contain decomposed=True and the bundle must be superseded.
+    """
+    # Create source items with high-overlap text so the bundle is findable via FTS
+    shared_text = "always use async await coroutines in django views python"
+    source_ids = []
+    for i in range(3):
+        sid = create_item(
+            db,
+            pattern=f"async django pattern {i}",
+            guidance=shared_text,
+            item_type="convention",
+            language="python",
+            project="myapp",
+        )
+        source_ids.append(sid)
+
+    # Create and promote an evolution candidate
+    _insert_evolution_candidate(
+        db,
+        "cand-fb",
+        source_ids,
+        pattern="async django await pattern",
+        guidance=shared_text,
+        scope_language="python",
+        scope_project="myapp",
+    )
+    bundle_id = promote_candidate(db, "cand-fb")
+
+    # Verify setup: bundle item exists and sources are tagged
+    bundle_row = db.execute(
+        "SELECT type, status FROM knowledge_items WHERE id = ?", (bundle_id,)
+    ).fetchone()
+    assert bundle_row["type"] == "bundle"
+    assert bundle_row["status"] == "active"
+
+    # Submit a correction that has heavy overlap with the bundle's pattern/guidance
+    feedback = _make_feedback_record("fb-001", shared_text)
+    result = extract_from_feedback(db, feedback)
+
+    # Result must signal decomposition
+    assert result is not None, "extract_from_feedback returned None unexpectedly"
+    assert result.get("decomposed") is True, f"Expected decomposed=True, got: {result}"
+    assert result.get("bundle_id") == bundle_id
+    assert set(result.get("source_ids", [])) == set(source_ids)
+
+    # Side effect: bundle must be superseded
+    bundle_row = db.execute(
+        "SELECT status FROM knowledge_items WHERE id = ?", (bundle_id,)
+    ).fetchone()
+    assert bundle_row["status"] == "superseded", "Bundle should be superseded after decomposition"
+
+    # Side effect: source items must have bundle_id cleared
+    for sid in source_ids:
+        row = db.execute("SELECT bundle_id FROM knowledge_items WHERE id = ?", (sid,)).fetchone()
+        assert row["bundle_id"] is None, f"Source {sid} should have bundle_id cleared"
+
+
+# ---------------------------------------------------------------------------
+# Query Presentation Grouping tests (Task 6)
+# ---------------------------------------------------------------------------
+
+from vidya.query import cascade_query, QueryResult  # noqa: E402
+
+
+def _make_bundled_items(db) -> tuple[list[str], str]:
+    """Create 3 items about error handling and bundle them. Returns (source_ids, bundle_id)."""
+    source_ids = []
+    for i in range(3):
+        iid = create_item(
+            db,
+            pattern=f"error handling python exception catch retry {i}",
+            guidance=f"always handle errors with try except blocks and retry logic python {i}",
+            item_type="convention",
+            language="python",
+            base_confidence=0.6,
+        )
+        source_ids.append(iid)
+
+    # Create bundle directly (Option 2 from task description)
+    bundle_id = create_item(
+        db,
+        pattern="error handling python exception catch retry bundle",
+        guidance="bundle: handle errors with try except blocks retry logic python comprehensive",
+        item_type="bundle",
+        language="python",
+        base_confidence=0.6,
+        source="evolution",
+    )
+
+    # Tag each source item with bundle_id
+    for sid in source_ids:
+        update_item(db, sid, bundle_id=bundle_id)
+
+    return source_ids, bundle_id
+
+
+def test_query_groups_bundled_items(db):
+    """When items share a bundle_id and the bundle is active, query returns one result."""
+    source_ids, bundle_id = _make_bundled_items(db)
+
+    results = cascade_query(
+        db,
+        context="error handling python exception catch retry",
+        language="python",
+    )
+
+    # Only the bundle result should appear — individual source items collapsed
+    result_ids = [r.id for r in results]
+    assert bundle_id in result_ids, "Bundle item should appear in results"
+
+    for sid in source_ids:
+        assert sid not in result_ids, f"Source item {sid} should be collapsed into bundle"
+
+    bundle_result = next(r for r in results if r.id == bundle_id)
+    assert bundle_result.match_source == "bundle"
+    assert bundle_result.bundle_member_count == 3
+
+
+def test_query_ungrouped_items_unchanged(db):
+    """Items without bundle_id pass through results unchanged (no match_source, no count)."""
+    for i in range(2):
+        create_item(
+            db,
+            pattern=f"database query optimisation index performance {i}",
+            guidance=f"always use indexes for database query performance optimisation {i}",
+            item_type="convention",
+            language="python",
+            base_confidence=0.7,
+        )
+
+    results = cascade_query(
+        db,
+        context="database query optimisation index performance",
+        language="python",
+    )
+
+    assert len(results) >= 1
+    for r in results:
+        assert r.match_source is None, "Ungrouped item should have no match_source"
+        assert r.bundle_member_count is None, "Ungrouped item should have no bundle_member_count"
+
+
+def test_query_after_decomposition_no_grouping(db):
+    """After a bundle is superseded (decomposed), individual items are returned ungrouped."""
+    source_ids, bundle_id = _make_bundled_items(db)
+
+    # Simulate decomposition: mark bundle as superseded, clear bundle_id on sources
+    update_item(db, bundle_id, status="superseded")
+    for sid in source_ids:
+        update_item(db, sid, bundle_id=None)
+
+    results = cascade_query(
+        db,
+        context="error handling python exception catch retry",
+        language="python",
+    )
+
+    result_ids = [r.id for r in results]
+
+    # Bundle should NOT appear (it's superseded, not active)
+    assert bundle_id not in result_ids, "Superseded bundle should not appear"
+
+    # Source items should appear ungrouped
+    for sid in source_ids:
+        assert sid in result_ids, f"Source item {sid} should appear after decomposition"
+
+    for r in results:
+        assert r.match_source is None, "No grouping after decomposition"
+        assert r.bundle_member_count is None
