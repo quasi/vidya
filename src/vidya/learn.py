@@ -187,11 +187,24 @@ def _handle_correction(
 
     Auto-promotes immediately — these are high-quality signals.
     The source determines the initial confidence via SOURCE_CONFIDENCE.
+
+    Special case: if the best-matching item is a bundle, decompose it and
+    return a decomposition result rather than merging or creating a new item.
+    The caller is responsible for routing the correction to the appropriate source.
     """
+    from vidya.evolve import decompose_bundle  # local import avoids circular deps
+
     similar = find_similar_items(db, detail, language, project)
 
     for existing in similar:
         if overlap_score(detail, existing) >= _MERGE_THRESHOLD:
+            if existing.get("type") == "bundle":
+                source_ids = decompose_bundle(db, existing["id"])
+                return {
+                    "decomposed": True,
+                    "bundle_id": existing["id"],
+                    "source_ids": source_ids,
+                }
             old_evidence = json.loads(existing.get("evidence") or "[]")
             old_evidence.append(feedback_id)
             item_dict = dict(existing)
