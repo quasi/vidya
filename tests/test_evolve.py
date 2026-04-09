@@ -1056,3 +1056,419 @@ def test_cli_feedback_decompose(cli_runner, db):
     )
     assert result.exit_code == 0, result.output
     assert "decomposed" in result.output.lower() or "bundle" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Integration tests (Task 8): end-to-end evolution lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _make_llm_mock(responses: list[tuple[str, str]]):
+    """Return a list of MagicMock completions for successive LLM calls.
+
+    Each entry in `responses` is (pattern, guidance).
+    """
+    mocks = []
+    for pattern, guidance in responses:
+        m = MagicMock()
+        m.choices[0].message.content = json.dumps({"pattern": pattern, "guidance": guidance})
+        mocks.append(m)
+    return mocks
+
+
+def test_evolution_lifecycle_end_to_end(db):
+    """Full evolution lifecycle: seed → cluster → synthesize → promote → query → feedback → re-query."""
+    # ------------------------------------------------------------------ #
+    # Step 1: Seed 10 items (all language="python", no project/framework)
+    # ------------------------------------------------------------------ #
+
+    # Group 1: error handling — 5 items with heavy shared vocabulary
+    # All share "python error handling exception blocks" tokens to push cohesion above 0.5
+    error_group_data = [
+        (
+            "python error exception handling try except blocks",
+            "python error handling always use try except blocks to catch exceptions correctly",
+        ),
+        (
+            "python error handling catch exception specific blocks",
+            "python error handling catch specific exceptions not bare except blocks",
+        ),
+        (
+            "python error exception logging traceback handling blocks",
+            "python error handling log exceptions with full traceback blocks for debugging",
+        ),
+        (
+            "python error handling finally cleanup exception blocks",
+            "python error handling use finally blocks for cleanup exception resources",
+        ),
+        (
+            "python error exception custom class handling blocks",
+            "python error handling create custom exception classes for python error blocks",
+        ),
+    ]
+    error_group_ids = []
+    for pattern, guidance in error_group_data:
+        iid = create_item(
+            db,
+            pattern=pattern,
+            guidance=guidance,
+            item_type="convention",
+            language="python",
+            base_confidence=0.7,
+        )
+        error_group_ids.append(iid)
+
+    # Group 2: logging config — 3 items sharing "python logging config setup" tokens
+    logging_group_data = [
+        (
+            "python logging config setup rotation format",
+            "python logging configure rotation and format for proper setup",
+        ),
+        (
+            "python logging handler rotation config setup",
+            "python logging use rotating file handler for config setup",
+        ),
+        (
+            "python logging format config level setup",
+            "python logging set level and format config for proper setup",
+        ),
+    ]
+    logging_group_ids = []
+    for pattern, guidance in logging_group_data:
+        iid = create_item(
+            db,
+            pattern=pattern,
+            guidance=guidance,
+            item_type="convention",
+            language="python",
+            base_confidence=0.7,
+        )
+        logging_group_ids.append(iid)
+
+    # Isolated: 2 items with unrelated vocabulary
+    isolated_ids = []
+    for pattern, guidance in [
+        (
+            "django orm queryset optimization",
+            "optimize django orm querysets using select_related and prefetch",
+        ),
+        (
+            "fastapi async endpoint design",
+            "design fastapi endpoints with async handlers for performance",
+        ),
+    ]:
+        iid = create_item(
+            db,
+            pattern=pattern,
+            guidance=guidance,
+            item_type="convention",
+            language="python",
+            base_confidence=0.7,
+        )
+        isolated_ids.append(iid)
+
+    # ------------------------------------------------------------------ #
+    # Step 2: detect_clusters → exactly 2 clusters
+    # ------------------------------------------------------------------ #
+    clusters = detect_clusters(
+        db,
+        language="python",
+        min_size=3,
+        overlap_threshold=0.4,
+        min_cohesion=0.5,
+    )
+    assert len(clusters) == 2, (
+        f"Expected 2 clusters, got {len(clusters)}: "
+        + str([(len(c.item_ids), c.theme_tokens) for c in clusters])
+    )
+
+    cluster_sizes = sorted(len(c.item_ids) for c in clusters)
+    assert cluster_sizes == [3, 5], f"Expected cluster sizes [3, 5], got {cluster_sizes}"
+
+    # The 2 isolated items must not appear in any cluster
+    all_clustered_ids = {iid for c in clusters for iid in c.item_ids}
+    for iso_id in isolated_ids:
+        assert iso_id not in all_clustered_ids, (
+            f"Isolated item {iso_id} should not be in any cluster"
+        )
+
+    # Identify which cluster is the error group and which is the logging group
+    error_cluster = next(c for c in clusters if len(c.item_ids) == 5)
+    logging_cluster = next(c for c in clusters if len(c.item_ids) == 3)
+
+    assert set(error_cluster.item_ids) == set(error_group_ids)
+    assert set(logging_cluster.item_ids) == set(logging_group_ids)
+
+    # ------------------------------------------------------------------ #
+    # Step 3: synthesize_cluster (mocked LLM) → 2 candidates created
+    # ------------------------------------------------------------------ #
+    error_synth_pattern = "python error exception handling"
+    error_synth_guidance = (
+        "always use try except blocks to catch specific exceptions, "
+        "log with traceback, use finally for cleanup, and create custom exception classes"
+    )
+    logging_synth_pattern = "python logging config rotation"
+    logging_synth_guidance = (
+        "configure python logging with rotation, set level and format, "
+        "use rotating file handler for proper logging setup"
+    )
+
+    llm_responses = _make_llm_mock([
+        (error_synth_pattern, error_synth_guidance),
+        (logging_synth_pattern, logging_synth_guidance),
+    ])
+
+    # Fetch the full item dicts for each cluster (synthesize_cluster needs them)
+    def _fetch_items_for_cluster(cluster: Cluster) -> list[dict]:
+        placeholders = ",".join("?" * len(cluster.item_ids))
+        rows = db.execute(
+            f"SELECT id, pattern, guidance FROM knowledge_items WHERE id IN ({placeholders})",
+            cluster.item_ids,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    with patch("litellm.completion", side_effect=llm_responses):
+        error_candidate = synthesize_cluster(
+            error_cluster,
+            _fetch_items_for_cluster(error_cluster),
+            db,
+            model="test-model",
+        )
+        logging_candidate = synthesize_cluster(
+            logging_cluster,
+            _fetch_items_for_cluster(logging_cluster),
+            db,
+            model="test-model",
+        )
+
+    assert error_candidate is not None, "synthesize_cluster returned None for error group"
+    assert logging_candidate is not None, "synthesize_cluster returned None for logging group"
+
+    # Verify both candidates are pending in the DB
+    rows = db.execute(
+        "SELECT id, status FROM evolution_candidates ORDER BY timestamp"
+    ).fetchall()
+    assert len(rows) == 2, f"Expected 2 candidates, found {len(rows)}"
+    for row in rows:
+        assert row["status"] == "pending", f"Candidate {row['id']} has status {row['status']}"
+
+    # ------------------------------------------------------------------ #
+    # Step 4: promote_candidate on the first (error) candidate
+    # ------------------------------------------------------------------ #
+    error_bundle_id = promote_candidate(db, error_candidate.id)
+    assert error_bundle_id is not None
+
+    # Bundle item must have type='bundle' and source='evolution'
+    bundle_row = db.execute(
+        "SELECT type, source, status FROM knowledge_items WHERE id = ?",
+        (error_bundle_id,),
+    ).fetchone()
+    assert bundle_row is not None, "Bundle item not found in knowledge_items"
+    assert bundle_row["type"] == "bundle"
+    assert bundle_row["source"] == "evolution"
+    assert bundle_row["status"] == "active"
+
+    # All source items from the error cluster must have bundle_id set
+    for sid in error_group_ids:
+        row = db.execute(
+            "SELECT bundle_id FROM knowledge_items WHERE id = ?", (sid,)
+        ).fetchone()
+        assert row["bundle_id"] == error_bundle_id, (
+            f"Source item {sid} should have bundle_id={error_bundle_id}"
+        )
+
+    # Candidate must be marked 'promoted'
+    cand_row = db.execute(
+        "SELECT status FROM evolution_candidates WHERE id = ?",
+        (error_candidate.id,),
+    ).fetchone()
+    assert cand_row["status"] == "promoted"
+
+    # ------------------------------------------------------------------ #
+    # Step 5: cascade_query — result should be grouped (match_source="bundle")
+    # ------------------------------------------------------------------ #
+    results = cascade_query(
+        db,
+        context="python error exception handling try except traceback",
+        language="python",
+    )
+
+    result_ids = [r.id for r in results]
+    assert error_bundle_id in result_ids, "Bundle should appear in query results"
+
+    # Individual source items from the error group should be collapsed into the bundle
+    for sid in error_group_ids:
+        assert sid not in result_ids, f"Source item {sid} should be collapsed into bundle"
+
+    bundle_result = next(r for r in results if r.id == error_bundle_id)
+    assert bundle_result.match_source == "bundle"
+    # bundle_member_count reflects source items that matched FTS for this context;
+    # may be a subset of the full 5 depending on which tokens are in the query
+    assert bundle_result.bundle_member_count is not None
+    assert bundle_result.bundle_member_count >= 1
+    # Bundle guidance is shown (synthesized), not individual
+    assert bundle_result.guidance == error_synth_guidance
+
+    # ------------------------------------------------------------------ #
+    # Step 6: negative feedback on the bundle → decomposition
+    # ------------------------------------------------------------------ #
+    # The feedback detail must overlap heavily with the bundle's pattern/guidance
+    feedback_detail = f"{error_synth_pattern} {error_synth_guidance}"
+    feedback_dict = {
+        "id": "fb-test-1",
+        "feedback_type": "user_correction",
+        "detail": feedback_detail,
+        "language": "python",
+        "project": None,
+        "framework": None,
+        "runtime": None,
+    }
+
+    decomp_result = extract_from_feedback(db, feedback_dict)
+
+    assert decomp_result is not None, "extract_from_feedback returned None"
+    assert decomp_result.get("decomposed") is True, (
+        f"Expected decomposed=True, got: {decomp_result}"
+    )
+    assert decomp_result.get("bundle_id") == error_bundle_id
+    assert set(decomp_result.get("source_ids", [])) == set(error_group_ids)
+
+    # ------------------------------------------------------------------ #
+    # Step 7: cascade_query again — items returned individually, no bundle grouping
+    # ------------------------------------------------------------------ #
+    results_after = cascade_query(
+        db,
+        context="python error exception handling try except traceback",
+        language="python",
+    )
+
+    result_ids_after = [r.id for r in results_after]
+
+    # Superseded bundle must NOT appear
+    assert error_bundle_id not in result_ids_after, (
+        "Superseded bundle should not appear in query results"
+    )
+
+    # No result should be match_source="bundle"
+    for r in results_after:
+        assert r.match_source != "bundle", (
+            f"Item {r.id} still shows as bundle after decomposition"
+        )
+
+    # Source items should appear individually
+    # (at least some of them — FTS match depends on context)
+    matched_sources = [sid for sid in error_group_ids if sid in result_ids_after]
+    assert len(matched_sources) > 0, "At least some source items should appear after decomposition"
+
+
+def test_evolution_reject_path(db):
+    """Rejection path: synthesize → reject → verify sources unaffected → re-cluster succeeds."""
+    # ------------------------------------------------------------------ #
+    # Step 1: Seed 3 items that will cluster
+    # ------------------------------------------------------------------ #
+    cluster_data = [
+        (
+            "python error exception handling try except blocks",
+            "python error handling always use try except blocks to catch exceptions correctly",
+        ),
+        (
+            "python error handling catch exception specific blocks",
+            "python error handling catch specific exceptions not bare except blocks",
+        ),
+        (
+            "python error exception logging traceback handling blocks",
+            "python error handling log exceptions with full traceback blocks for debugging",
+        ),
+    ]
+    source_ids = []
+    for pattern, guidance in cluster_data:
+        iid = create_item(
+            db,
+            pattern=pattern,
+            guidance=guidance,
+            item_type="convention",
+            language="python",
+            base_confidence=0.7,
+        )
+        source_ids.append(iid)
+
+    # ------------------------------------------------------------------ #
+    # Step 2: detect_clusters + synthesize_cluster (mocked LLM)
+    # ------------------------------------------------------------------ #
+    clusters = detect_clusters(
+        db,
+        language="python",
+        min_size=3,
+        overlap_threshold=0.4,
+        min_cohesion=0.5,
+    )
+    assert len(clusters) == 1, f"Expected 1 cluster, got {len(clusters)}"
+    assert set(clusters[0].item_ids) == set(source_ids)
+
+    cluster = clusters[0]
+    items = _fetch_items_for_reject(db, cluster)
+
+    mock_resp = MagicMock()
+    mock_resp.choices[0].message.content = json.dumps({
+        "pattern": "python error exception handling",
+        "guidance": (
+            "always use try except blocks for python error handling; "
+            "catch specific exceptions and log with traceback"
+        ),
+    })
+
+    with patch("litellm.completion", return_value=mock_resp):
+        candidate = synthesize_cluster(cluster, items, db, model="test-model")
+
+    assert candidate is not None
+
+    # ------------------------------------------------------------------ #
+    # Step 3: reject_candidate
+    # ------------------------------------------------------------------ #
+    reject_candidate(db, candidate.id)
+
+    # ------------------------------------------------------------------ #
+    # Step 4: verify candidate status = 'rejected'
+    # ------------------------------------------------------------------ #
+    cand_row = db.execute(
+        "SELECT status FROM evolution_candidates WHERE id = ?", (candidate.id,)
+    ).fetchone()
+    assert cand_row["status"] == "rejected"
+
+    # ------------------------------------------------------------------ #
+    # Step 5: verify source items have NO bundle_id
+    # ------------------------------------------------------------------ #
+    for sid in source_ids:
+        row = db.execute(
+            "SELECT bundle_id FROM knowledge_items WHERE id = ?", (sid,)
+        ).fetchone()
+        assert row["bundle_id"] is None, (
+            f"Source item {sid} should have no bundle_id after rejection"
+        )
+
+    # ------------------------------------------------------------------ #
+    # Step 6: re-run detect_clusters → same items still cluster
+    # ------------------------------------------------------------------ #
+    clusters_after = detect_clusters(
+        db,
+        language="python",
+        min_size=3,
+        overlap_threshold=0.4,
+        min_cohesion=0.5,
+    )
+    assert len(clusters_after) == 1, (
+        f"Items should still cluster after rejection, got {len(clusters_after)} clusters"
+    )
+    assert set(clusters_after[0].item_ids) == set(source_ids), (
+        "Re-clustered items should be the same source items"
+    )
+
+
+def _fetch_items_for_reject(db, cluster: Cluster) -> list[dict]:
+    """Fetch pattern and guidance for cluster members."""
+    placeholders = ",".join("?" * len(cluster.item_ids))
+    rows = db.execute(
+        f"SELECT id, pattern, guidance FROM knowledge_items WHERE id IN ({placeholders})",
+        cluster.item_ids,
+    ).fetchall()
+    return [dict(r) for r in rows]
