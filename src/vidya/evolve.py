@@ -11,7 +11,7 @@ import os
 import sqlite3
 import string
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import combinations
 from typing import Any
@@ -296,9 +296,7 @@ def decompose_bundle(
     bundle = get_item(db, bundle_id)
     source_ids: list[str] = json.loads(bundle.get("related_items") or "[]")
 
-    # Clear bundle_id on all source items. Raw SQL is used because update_item
-    # would need bundle_id=None which passes None as a Python value — that works
-    # fine in SQLite, but using a targeted WHERE clause is clearer intent.
+    # Clear bundle_id on all source items in one statement (vs N update_item calls).
     db.execute(
         "UPDATE knowledge_items SET bundle_id = NULL WHERE bundle_id = ?",
         (bundle_id,),
@@ -396,6 +394,10 @@ def synthesize_cluster(
 
     synth_pattern: str = parsed.get("pattern", "")
     synth_guidance: str = parsed.get("guidance", "")
+
+    if not synth_pattern.strip() or not synth_guidance.strip():
+        logger.warning("synthesize_cluster: LLM returned empty pattern or guidance, skipping")
+        return None
 
     # Quality check: warn if synthesized guidance is shorter than shortest source
     source_word_counts = [len(item["guidance"].split()) for item in items]
