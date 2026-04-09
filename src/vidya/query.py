@@ -48,6 +48,8 @@ class QueryResult:
     effective_confidence: float
     scope_level: str
     match_reason: str
+    match_source: str | None = None      # "bundle" when grouped
+    bundle_member_count: int | None = None  # count of grouped items
 
 
 def cascade_query(
@@ -133,7 +135,110 @@ def cascade_query(
             match_reason=reason,
         ))
 
-    return results
+    return _group_by_bundle(db, results)
+
+
+def _group_by_bundle(
+    db: sqlite3.Connection,
+    results: list[QueryResult],
+) -> list[QueryResult]:
+    """Compact results sharing a bundle_id into a single bundle QueryResult.
+
+    Presentation-layer only — the FTS retrieval is untouched.
+    For each group whose bundle is active, replace the group with the bundle item.
+    If the bundle is not active (superseded/archived), pass sources through unchanged.
+    Items without a bundle_id are returned as-is.
+    Sort order is preserved: the bundle result takes the position of its highest-ranked member.
+    """
+    if not results:
+        return results
+
+    result_ids = [r.id for r in results]
+
+    # Query bundle_id for all result items in one shot
+    placeholders = ",".join("?" * len(result_ids))
+    bundle_rows = db.execute(
+        f"SELECT id, bundle_id FROM knowledge_items WHERE id IN ({placeholders}) AND bundle_id IS NOT NULL",
+        result_ids,
+    ).fetchall()
+
+    if not bundle_rows:
+        return results
+
+    # Map item_id → bundle_id for items that have one
+    item_to_bundle: dict[str, str] = {row["id"]: row["bundle_id"] for row in bundle_rows}
+
+    # Group result objects by bundle_id, preserving position index
+    bundle_groups: dict[str, list[tuple[int, QueryResult]]] = {}
+    for idx, result in enumerate(results):
+        bid = item_to_bundle.get(result.id)
+        if bid is not None:
+            bundle_groups.setdefault(bid, []).append((idx, result))
+
+    # For each bundle group, decide: replace with bundle item or pass through
+    replacements: dict[int, QueryResult] = {}  # position → replacement result
+    suppressed_positions: set[int] = set()
+
+    for bundle_id, indexed_members in bundle_groups.items():
+        # Fetch the bundle item — must be active
+        bundle_row = db.execute(
+            "SELECT id, pattern, guidance, type, base_confidence, language, runtime, framework, project "
+            "FROM knowledge_items WHERE id = ? AND status = 'active'",
+            (bundle_id,),
+        ).fetchone()
+
+        if bundle_row is None:
+            # Bundle is not active (superseded/archived) — pass sources through unchanged
+            continue
+
+        # Replace the group with a single bundle result.
+        # Find the earliest position among: the source items AND the bundle item itself
+        # (bundle may also appear in results from its own FTS match).
+        source_positions = [idx for idx, _ in indexed_members]
+        member_results = [r for _, r in indexed_members]
+
+        # Check if the bundle item itself is in results
+        bundle_item_id = bundle_row["id"]
+        bundle_in_results_positions = [
+            pos for pos, r in enumerate(results) if r.id == bundle_item_id
+        ]
+
+        all_positions = source_positions + bundle_in_results_positions
+        insertion_pos = min(all_positions)
+        extra_positions = set(all_positions) - {insertion_pos}
+
+        max_confidence = max(r.effective_confidence for r in member_results)
+        first = member_results[0]
+        n = len(member_results)
+
+        bundle_result = QueryResult(
+            id=bundle_row["id"],
+            pattern=bundle_row["pattern"],
+            guidance=bundle_row["guidance"],
+            type=bundle_row["type"],
+            effective_confidence=max_confidence,
+            scope_level=first.scope_level,
+            match_reason=first.match_reason + f" (bundled {n} items)",
+            match_source="bundle",
+            bundle_member_count=n,
+        )
+
+        replacements[insertion_pos] = bundle_result
+        suppressed_positions.update(extra_positions)
+
+    if not replacements and not suppressed_positions:
+        return results
+
+    final: list[QueryResult] = []
+    for idx, result in enumerate(results):
+        if idx in suppressed_positions:
+            continue
+        if idx in replacements:
+            final.append(replacements[idx])
+        else:
+            final.append(result)
+
+    return final
 
 
 def _fetch_in_scope(
