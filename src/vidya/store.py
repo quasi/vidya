@@ -29,6 +29,7 @@ _VALID_FEEDBACK_TYPES: frozenset[str] = frozenset({
 _VALID_ITEM_TYPES: frozenset[str] = frozenset({
     "convention", "anti_pattern", "precondition", "postcondition",
     "heuristic", "diagnostic", "warning", "recovery", "workflow",
+    "bundle",
 })
 
 _VALID_RESULT_STATUSES: frozenset[str] = frozenset({
@@ -60,6 +61,7 @@ _ITEM_WRITABLE_COLUMNS: frozenset[str] = frozenset({
     "last_fired", "fire_count", "success_count", "fail_count",
     "overrides", "superseded_by", "related_items",
     "version", "explanation", "status",
+    "bundle_id",
 })
 
 

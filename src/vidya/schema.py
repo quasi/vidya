@@ -37,9 +37,13 @@ CREATE TABLE IF NOT EXISTS knowledge_items (
     version INTEGER DEFAULT 1,
 
     explanation TEXT,
-    status TEXT DEFAULT 'active'
+    status TEXT DEFAULT 'active',
+
+    bundle_id TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_bundle_id
+    ON knowledge_items(bundle_id);
 CREATE INDEX IF NOT EXISTS idx_scope
     ON knowledge_items(language, runtime, framework, project);
 CREATE INDEX IF NOT EXISTS idx_status_confidence
@@ -186,7 +190,63 @@ CREATE TABLE IF NOT EXISTS knowledge_archive (
     reason TEXT NOT NULL,
     original_data TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS evolution_candidates (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    guidance TEXT NOT NULL,
+    source_item_ids TEXT NOT NULL,  -- JSON array of knowledge_item IDs
+    scope_language TEXT,
+    scope_framework TEXT,
+    scope_project TEXT,
+    cluster_theme TEXT NOT NULL,
+    cohesion_score REAL NOT NULL,
+    synthesis_model TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',  -- pending, promoted, rejected
+    review_notes TEXT
+);
 """
+
+
+_EVOLUTION_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS evolution_candidates (
+    id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    guidance TEXT NOT NULL,
+    source_item_ids TEXT NOT NULL,
+    scope_language TEXT,
+    scope_framework TEXT,
+    scope_project TEXT,
+    cluster_theme TEXT NOT NULL,
+    cohesion_score REAL NOT NULL,
+    synthesis_model TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    review_notes TEXT
+);
+"""
+
+_EVOLUTION_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_bundle_id ON knowledge_items(bundle_id)"
+)
+
+
+def migrate_add_evolution(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: add bundle_id column and create evolution_candidates table.
+
+    Safe to call on both fresh and existing databases.
+    """
+    try:
+        conn.execute("ALTER TABLE knowledge_items ADD COLUMN bundle_id TEXT")
+        conn.commit()
+    except Exception:
+        # Column already exists — sqlite3 raises OperationalError
+        pass
+
+    conn.executescript(_EVOLUTION_TABLE_DDL)
+    conn.execute(_EVOLUTION_INDEX_DDL)
+    conn.commit()
 
 
 def init_db(path: str) -> sqlite3.Connection:
