@@ -244,35 +244,39 @@ def test_cluster_excludes_archived(db):
 
 
 def test_cluster_cohesion_gate(db):
-    """Components whose average pairwise overlap is below min_cohesion are rejected."""
-    # Items with very different vocabularies that happen to share just enough tokens
-    # to form a connected component but not enough for cohesion >= 0.5
-    texts = [
-        ("logging setup config file rotation", "configure logging with rotating file handler"),
-        ("async event loop coroutine await", "use asyncio event loop and await coroutines"),
-        ("database connection pool transaction", "manage database connections with pool and transactions"),
-    ]
-    for pattern, guidance in texts:
-        create_item(
-            db,
-            pattern=pattern,
-            guidance=guidance,
-            item_type="convention",
-            language="python",
-            project="myapp",
-        )
+    """Components whose average pairwise overlap is below min_cohesion are rejected.
 
-    # With a very low overlap_threshold items might connect but cohesion should be low.
-    # Use overlap_threshold=0.1 to force connectivity, then cohesion gate should reject.
+    Strategy: create 3 items that form a chain (A-B connected, B-C connected, A-C not)
+    via a shared bridging token. The component has size 3 (passes min_size) but low
+    cohesion since most pairs have minimal overlap. Verify it's rejected by cohesion,
+    then accepted when min_cohesion is lowered.
+    """
+    # A and B share "config" bridge token; B and C share "setup" bridge token;
+    # A and C share nothing beyond stopwords.
+    create_item(db, pattern="config alpha bravo charlie delta",
+                guidance="config alpha bravo charlie delta echo",
+                item_type="convention", language="python", project="cohesion")
+    create_item(db, pattern="config setup foxtrot golf hotel",
+                guidance="config setup foxtrot golf hotel india",
+                item_type="convention", language="python", project="cohesion")
+    create_item(db, pattern="setup juliet kilo lima mike",
+                guidance="setup juliet kilo lima mike november",
+                item_type="convention", language="python", project="cohesion")
+
+    # At threshold=0.1 all three connect (each pair shares at least 1/10 tokens).
+    # But cohesion is low (A-C overlap ≈ 0) → average pairwise well below 0.5.
     clusters = detect_clusters(
-        db,
-        language="python",
-        project="myapp",
-        min_size=3,
-        overlap_threshold=0.1,
-        min_cohesion=0.5,
+        db, language="python", project="cohesion",
+        min_size=3, overlap_threshold=0.1, min_cohesion=0.5,
     )
-    assert clusters == []
+    assert clusters == [], "Cohesion gate should reject low-cohesion component"
+
+    # With min_cohesion lowered, the same component should be accepted.
+    clusters_low = detect_clusters(
+        db, language="python", project="cohesion",
+        min_size=3, overlap_threshold=0.1, min_cohesion=0.05,
+    )
+    assert len(clusters_low) == 1, "Component should pass with low cohesion threshold"
 
 
 def test_cluster_theme_tokens(db):

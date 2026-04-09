@@ -204,55 +204,58 @@ def promote_candidate(
     """
     from vidya.store import create_item, update_item  # local import avoids circular deps
 
-    # 1. Read candidate
-    cand = db.execute(
-        "SELECT * FROM evolution_candidates WHERE id = ?", (candidate_id,)
-    ).fetchone()
-    if cand is None:
-        raise KeyError(f"Evolution candidate not found: {candidate_id}")
+    # All reads and writes in one transaction
+    with db:
+        # 1. Read candidate
+        cand = db.execute(
+            "SELECT * FROM evolution_candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()
+        if cand is None:
+            raise KeyError(f"Evolution candidate not found: {candidate_id}")
+        if cand["status"] != "pending":
+            raise ValueError(f"Candidate {candidate_id} has status '{cand['status']}', expected 'pending'")
 
-    source_ids: list[str] = json.loads(cand["source_item_ids"])
+        source_ids: list[str] = json.loads(cand["source_item_ids"])
 
-    # 2. Compute average base_confidence from source items
-    rows = db.execute(
-        f"SELECT base_confidence FROM knowledge_items WHERE id IN ({','.join('?' * len(source_ids))})",
-        source_ids,
-    ).fetchall()
-    if rows:
-        avg_confidence = sum(r["base_confidence"] for r in rows) / len(rows)
-    else:
-        avg_confidence = 0.0
+        # 2. Compute average base_confidence from source items
+        rows = db.execute(
+            f"SELECT base_confidence FROM knowledge_items WHERE id IN ({','.join('?' * len(source_ids))})",
+            source_ids,
+        ).fetchall()
+        if rows:
+            avg_confidence = sum(r["base_confidence"] for r in rows) / len(rows)
+        else:
+            avg_confidence = 0.0
 
-    guidance = edited_guidance if edited_guidance is not None else cand["guidance"]
+        guidance = edited_guidance if edited_guidance is not None else cand["guidance"]
 
-    # 3. Create bundle item (no commit yet — we'll batch the transaction)
-    bundle_id = create_item(
-        db,
-        pattern=cand["pattern"],
-        guidance=guidance,
-        item_type="bundle",
-        language=cand["scope_language"],
-        framework=cand["scope_framework"],
-        project=cand["scope_project"],
-        base_confidence=avg_confidence,
-        source="evolution",
-        _commit=False,
-    )
+        # 3. Create bundle item
+        bundle_id = create_item(
+            db,
+            pattern=cand["pattern"],
+            guidance=guidance,
+            item_type="bundle",
+            language=cand["scope_language"],
+            framework=cand["scope_framework"],
+            project=cand["scope_project"],
+            base_confidence=avg_confidence,
+            source="evolution",
+            _commit=False,
+        )
 
-    # Set related_items on the bundle
-    update_item(db, bundle_id, related_items=json.dumps(source_ids), _commit=False)
+        # Set related_items on the bundle
+        update_item(db, bundle_id, related_items=json.dumps(source_ids), _commit=False)
 
-    # 4. Tag each source item with the bundle_id
-    for sid in source_ids:
-        update_item(db, sid, bundle_id=bundle_id, _commit=False)
+        # 4. Tag each source item with the bundle_id
+        for sid in source_ids:
+            update_item(db, sid, bundle_id=bundle_id, _commit=False)
 
-    # 5. Mark candidate as promoted
-    db.execute(
-        "UPDATE evolution_candidates SET status = 'promoted' WHERE id = ?",
-        (candidate_id,),
-    )
+        # 5. Mark candidate as promoted
+        db.execute(
+            "UPDATE evolution_candidates SET status = 'promoted' WHERE id = ?",
+            (candidate_id,),
+        )
 
-    db.commit()
     return bundle_id
 
 
