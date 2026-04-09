@@ -269,12 +269,17 @@ def promote_candidate(
 
 def reject_candidate(db: sqlite3.Connection, candidate_id: str) -> None:
     """Mark an evolution candidate as rejected. Source items are not modified."""
-    cursor = db.execute(
+    row = db.execute(
+        "SELECT status FROM evolution_candidates WHERE id = ?", (candidate_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"Evolution candidate not found: {candidate_id}")
+    if row["status"] != "pending":
+        raise ValueError(f"Candidate {candidate_id} has status '{row['status']}', expected 'pending'")
+    db.execute(
         "UPDATE evolution_candidates SET status = 'rejected' WHERE id = ?",
         (candidate_id,),
     )
-    if cursor.rowcount == 0:
-        raise KeyError(f"Evolution candidate not found: {candidate_id}")
     db.commit()
 
 

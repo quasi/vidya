@@ -199,7 +199,10 @@ def _handle_correction(
     for existing in similar:
         if overlap_score(detail, existing) >= _MERGE_THRESHOLD:
             if existing.get("type") == "bundle":
-                source_ids = decompose_bundle(db, existing["id"])
+                try:
+                    source_ids = decompose_bundle(db, existing["id"])
+                except (KeyError, ValueError):
+                    continue  # bundle inconsistent — fall through to next match
                 return {
                     "decomposed": True,
                     "bundle_id": existing["id"],

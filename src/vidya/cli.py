@@ -519,14 +519,16 @@ def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
                 source_item_ids = json.loads(r.get("source_item_ids") or "[]")
                 source_items = []
                 for iid in source_item_ids:
-                    item = get_item(db, iid)
-                    if item:
-                        source_items.append({
-                            "id": iid,
-                            "pattern": item.get("pattern"),
-                            "guidance": item.get("guidance"),
-                            "base_confidence": item.get("base_confidence"),
-                        })
+                    try:
+                        item = get_item(db, iid)
+                    except KeyError:
+                        continue
+                    source_items.append({
+                        "id": iid,
+                        "pattern": item.get("pattern"),
+                        "guidance": item.get("guidance"),
+                        "base_confidence": item.get("base_confidence"),
+                    })
                 output.append({
                     "id": r["id"],
                     "pattern": r["pattern"],
@@ -548,9 +550,11 @@ def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
             source_item_ids = json.loads(r.get("source_item_ids") or "[]")
             source_items = []
             for iid in source_item_ids:
-                item = get_item(db, iid)
-                if item:
-                    source_items.append(item)
+                try:
+                    item = get_item(db, iid)
+                except KeyError:
+                    continue
+                source_items.append(item)
 
             click.echo(f"\nCandidate {idx} of {total} "
                        f"[cohesion: {r['cohesion_score']:.2f}, "
@@ -641,16 +645,22 @@ def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
                 click.echo(f"  Scope:  {c.scope}")
                 click.echo(f"  Theme:  {' '.join(c.theme_tokens)}")
                 for iid in c.item_ids:
-                    item = get_item(db, iid)
-                    if item:
-                        click.echo(f"  - {item.get('pattern', iid)}")
+                    try:
+                        item = get_item(db, iid)
+                    except KeyError:
+                        continue
+                    click.echo(f"  - {item.get('pattern', iid)}")
         return
 
     # --- Full pipeline (or dry-run) ---
     created = []
     for cluster in clusters:
-        items = [get_item(db, iid) for iid in cluster.item_ids]
-        items = [it for it in items if it]
+        items = []
+        for iid in cluster.item_ids:
+            try:
+                items.append(get_item(db, iid))
+            except KeyError:
+                pass
         candidate = synthesize_cluster(cluster, items, db, model=model)
         if candidate is None:
             continue

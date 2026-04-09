@@ -237,4 +237,5 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_DDL)
     conn.commit()
+    migrate_add_evolution(conn)  # idempotent: safe on fresh and existing DBs
     return conn
