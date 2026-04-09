@@ -495,8 +495,21 @@ def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
 
     # --- --review mode ---
     if review:
+        conditions = ["status = 'pending'"]
+        params = []
+        if language:
+            conditions.append("scope_language = ?")
+            params.append(language)
+        if framework:
+            conditions.append("scope_framework = ?")
+            params.append(framework)
+        if project:
+            conditions.append("scope_project = ?")
+            params.append(project)
+        where = " AND ".join(conditions)
         rows = db.execute(
-            "SELECT * FROM evolution_candidates WHERE status = 'pending' ORDER BY timestamp"
+            f"SELECT * FROM evolution_candidates WHERE {where} ORDER BY timestamp",
+            params,
         ).fetchall()
 
         if use_json:
