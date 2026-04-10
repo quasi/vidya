@@ -219,7 +219,8 @@ def migrate_add_evolution(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE knowledge_items ADD COLUMN bundle_id TEXT")
         conn.commit()
     except sqlite3.OperationalError:
-        # Column already exists
+        # Either column already exists (existing DB) or table doesn't exist yet
+        # (fresh DB — executescript below will create it with bundle_id in the DDL).
         pass
 
     # Re-run the full DDL — all statements use IF NOT EXISTS, so this is safe
@@ -235,7 +236,8 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(_DDL)
-    conn.commit()
-    migrate_add_evolution(conn)  # idempotent: safe on fresh and existing DBs
+    # Migration runs first: on existing DBs it adds bundle_id before _DDL creates
+    # idx_bundle_id; on fresh DBs the ALTER fails silently and executescript(_DDL)
+    # inside the migration creates everything from scratch.
+    migrate_add_evolution(conn)
     return conn
