@@ -106,6 +106,8 @@ vidya [--json] brief        Structured context dump (items, attention, hints)
 vidya [--json] items        List knowledge items
 vidya [--json] stats        Show knowledge base statistics
 vidya [--json] explain      Show evidence trail for a knowledge item
+vidya [--json] evolve       Detect knowledge clusters and synthesize compound rules
+vidya [--json] maintain     Health check, stale item detection, optional archival
 ```
 
 Pass `--json` before any subcommand for machine-readable output:
@@ -115,6 +117,43 @@ vidya --json query --context "error handling" --language python
 ```
 
 Run `vidya --help` or `vidya <command> --help` for options.
+
+## Knowledge Evolution
+
+As knowledge accumulates, related items cluster. `vidya evolve` detects those clusters and uses an LLM to synthesize them into a single compound rule (a *bundle*). You review the result before it enters the knowledge base.
+
+```bash
+# See what clusters exist (no synthesis yet)
+vidya evolve --cluster-only --language python --project myproject
+
+# Synthesize candidates (default: min 3 items, overlap 0.35, cohesion 0.35)
+vidya evolve --language python --project myproject
+
+# Review pending candidates interactively
+vidya evolve --review --project myproject
+```
+
+The review prompt offers: `[a]pprove  [e]dit  [r]eject  [s]kip  [q]uit`. Approving a candidate creates a `bundle` knowledge item and links it to its source items. Rejecting leaves the source items unchanged.
+
+**LLM configuration** — synthesis calls an LLM via litellm. Override with environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VIDYA_EVOLVE_MODEL` | `openai/gemma-4-26b-a4b-it-4bit` | litellm model string |
+| `VIDYA_EVOLVE_API_BASE` | `http://192.168.1.17:8099/v1` | OpenAI-compatible endpoint |
+| `VIDYA_EVOLVE_API_KEY` | `omlx-1234` | Bearer token |
+
+For hosted models, set `VIDYA_EVOLVE_MODEL=claude-haiku-4-5` and leave `API_BASE`/`API_KEY` unset.
+
+**Tuning thresholds** — defaults suit knowledge bases of 100+ items. For smaller bases use looser thresholds:
+
+```bash
+vidya evolve --min-size 2 --overlap-threshold 0.3 --min-cohesion 0.3
+```
+
+**Bundle decomposition** — if you record a `user_correction` feedback that matches a bundle item, Vidya decomposes the bundle back into its source items so the correction can target the specific rule.
+
+---
 
 ## Confidence Model
 
@@ -133,7 +172,7 @@ Two-field model per item:
 | MEDIUM | 0.2 - 0.5 | Not yet proven. Treat as suggestion. |
 | LOW | < 0.2 | Stale or unreliable. Filtered from default queries. |
 
-A new item from feedback starts at 0.15. It takes ~8 confirmations to reach HIGH. Seeded items start at 0.5-0.6.
+Starting confidence depends on source: `user_correction` → 0.85 (HIGH immediately), `review_rejected` → 0.65, `user_confirmation` → 0.70. Seeded items start at the `--confidence` value (default 0.5).
 
 ## Knowledge Scope
 
@@ -148,24 +187,27 @@ A project-level item overrides a language-level item on the same topic. Items ca
 
 ## Database
 
-SQLite with WAL mode and FTS5 full-text search. Stored at `~/.vidya/vidya.db`.
+SQLite with WAL mode and FTS5 full-text search. Stored at `~/.vidya/vidya.db`. The FTS5 index uses the **Porter stemmer** tokenizer, so "testing" matches "test", "worktrees" matches "worktree", and so on.
 
-Five tables: `knowledge_items`, `task_records`, `step_records`, `feedback_records`, `extraction_candidates`. Plus `knowledge_fts` (FTS5 virtual table) and `knowledge_archive` for archived items.
+Seven tables: `knowledge_items`, `task_records`, `step_records`, `feedback_records`, `extraction_candidates`, `evolution_candidates`, `schema_migrations`. Plus `knowledge_fts` (FTS5 virtual table) and `knowledge_archive` for archived items.
 
 ## Project Structure
 
 ```
 src/vidya/
-  schema.py       Database schema and initialization
+  schema.py       Database schema, migrations, initialization
+  migrate.py      One-time data migration utilities
   store.py        CRUD operations for all tables
   query.py        Cascade query with scope resolution and FTS5 ranking
   confidence.py   Bayesian confidence updates and freshness decay
-  learn.py        Feedback-driven knowledge extraction
+  learn.py        Feedback-driven knowledge extraction and bundle decomposition
+  evolve.py       Cluster detection, LLM synthesis, bundle promotion lifecycle
   brief.py        Structured context dump for vidya brief
-  maintain.py     Statistics computation
+  maintain.py     Statistics, health reports, stale item archival
   seed.py         Import knowledge from markdown files
+  guidance.py     Agent guidance generation for JSON responses
   cli.py          CLI (Click)
-tests/            113 tests
+tests/            208 tests
 ```
 
 ## Documentation
@@ -176,9 +218,9 @@ tests/            113 tests
 
 ## Status
 
-Phase 1 complete. 10 source modules, 113 tests, all passing. CLI operational.
+Phase 1 complete. 12 source modules, 208 tests, all passing. CLI operational.
 
-Phase 2 (capacity eviction, drift detection, pattern-based extraction) is designed but not yet implemented.
+Knowledge evolution (`vidya evolve`) is implemented and operational. Phase 2 capacity eviction and drift detection are designed but not yet implemented.
 
 ## Author & License
 

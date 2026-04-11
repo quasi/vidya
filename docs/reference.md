@@ -17,7 +17,8 @@ Vidya accumulates procedural knowledge from agent sessions and serves it back. K
 5. [MCP Tool Reference](#mcp-tool-reference)
 6. [Seed File Format](#seed-file-format)
 7. [Learning: How Feedback Works](#learning-how-feedback-works)
-8. [Database Tables](#database-tables)
+8. [Knowledge Evolution](#knowledge-evolution)
+9. [Database Tables](#database-tables)
 
 ---
 
@@ -32,17 +33,17 @@ Each knowledge item answers two questions: **when does this apply** (pattern) an
 | `id` | TEXT | UUID, primary key |
 | `pattern` | TEXT | When this item applies (semantic condition) |
 | `guidance` | TEXT | What to do |
-| `type` | TEXT | `convention`, `anti_pattern`, `precondition`, `postcondition` (see Item types below) |
+| `type` | TEXT | `convention`, `anti_pattern`, `precondition`, `postcondition`, `bundle` (see Item types below) |
 | `language` | TEXT | Scope: `python`, `common-lisp`, etc. NULL = global |
 | `runtime` | TEXT | Scope: `cpython-3.12`, `sbcl`, etc. NULL = any |
 | `framework` | TEXT | Scope: `fastapi`, `asdf`, etc. NULL = any |
 | `project` | TEXT | Scope: `canon`, `pooler`, etc. NULL = any project |
 | `base_confidence` | REAL | Epistemic trust (0–1). Updated by Bayesian formula on observed outcomes. |
-| `source` | TEXT | `seed`, `observation`, `extraction` |
+| `source` | TEXT | `seed`, `observation`, `extraction`, `user_correction`, `evolution` |
 | `tags` | TEXT | JSON array of strings. Stored but not yet queried (Phase 2). |
 | `details_json` | TEXT | Structured payload, NULL in Phase 1 |
 | `overrides` | TEXT | Item ID this item overrides (suppresses in query results) |
-| `status` | TEXT | `active`, `archived`, `evicted` |
+| `status` | TEXT | `active`, `archived`, `evicted`, `superseded` |
 | `first_seen` | TEXT | ISO 8601 timestamp |
 | `last_fired` | TEXT | ISO 8601 timestamp of last successful query match. NULL if never fired. |
 | `fire_count` | INTEGER | Times returned in query results |
@@ -50,17 +51,29 @@ Each knowledge item answers two questions: **when does this apply** (pattern) an
 | `fail_count` | INTEGER | Times negatively confirmed |
 | `evidence` | TEXT | JSON array of feedback/observation IDs |
 | `explanation` | TEXT | Free-text explanation of why the item exists |
+| `bundle_id` | TEXT | ID of the bundle item this item belongs to (NULL if not bundled) |
+| `related_items` | TEXT | JSON array of source item IDs (set on bundle items) |
 
 ### Item types
 
-| Type | Meaning | Typical trigger words |
-|------|---------|----------------------|
-| `convention` | What to do | "always", "must", "should" (also the default fallback) |
-| `anti_pattern` | What not to do | "don't", "never", "avoid" |
-| `precondition` | Check before acting | "before", "first", "ensure" |
-| `postcondition` | Verify after acting | "after", "then", "verify" |
+| Type | Meaning | Origin |
+|------|---------|--------|
+| `convention` | What to do | Auto-classified from feedback/seed text |
+| `anti_pattern` | What not to do | Auto-classified from feedback/seed text |
+| `precondition` | Check before acting | Auto-classified from feedback/seed text |
+| `postcondition` | Verify after acting | Auto-classified from feedback/seed text |
+| `bundle` | Compound rule synthesized from a cluster | Created by `vidya evolve` + promote |
 
-Classification happens automatically during `vidya feedback` and `vidya seed` based on keyword detection in the guidance text. Text that matches none of the above keywords is classified as `convention`. Override with explicit `--type` is not yet exposed; edit the DB directly if needed.
+For the four auto-classified types, classification happens during `vidya feedback` and `vidya seed` based on keyword detection in the guidance text:
+
+| Keywords in text | Assigned type |
+|-----------------|---------------|
+| "don't", "never", "avoid" | `anti_pattern` |
+| "after", "then", "verify" | `postcondition` |
+| "before", "first", "ensure" | `precondition` |
+| anything else | `convention` |
+
+Override with explicit `--type` is not yet exposed; edit the DB directly if needed.
 
 ---
 
@@ -70,7 +83,18 @@ Two separate numbers combine to produce a ranking score.
 
 ### base_confidence
 
-Epistemic trust. Starts at the seeded value (typically 0.5–0.6) or 0.15 for auto-extracted items. Updated by Bayesian formulas:
+Epistemic trust. Starting value depends on the source event:
+
+| Source | Starting base_confidence |
+|--------|--------------------------|
+| `user_correction` | 0.85 |
+| `user_confirmation` | 0.70 |
+| `review_rejected` | 0.65 |
+| `test_outcome` | 0.60 |
+| `seed` | user-supplied `--confidence` (default 0.5) |
+| `extraction` | 0.40 |
+
+Updated by heuristic formulas:
 
 ```
 On success:  base_confidence += 0.05 × (1.0 − base_confidence)
@@ -151,12 +175,12 @@ All commands read from and write to `~/.vidya/vidya.db`.
 Return ranked knowledge items for the current context.
 
 ```
-vidya query --language LANG --context TEXT [options]
+vidya query --context TEXT [options]
 ```
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `--language` | yes | — | Language scope |
+| `--language` | no | — | Language scope |
 | `--context` | yes | — | What you're doing (semantic description) |
 | `--runtime` | no | — | Runtime scope |
 | `--framework` | no | — | Framework scope |
@@ -183,6 +207,10 @@ vidya query --language python --project canon --context "run pytest test"
 ```
 
 **How ranking works**: FTS5 tokenizes the context into individual words joined with OR. If any items match the FTS query, non-matching items are excluded entirely. The final score is `(1 + fts_score) × effective_confidence × scope_boost`.
+
+**Additive scope**: `--language` and `--project` parameters are additive — an item matches if it belongs to the specified language scope OR the specified project scope. This means a query with `--language python --project myproject` returns items scoped to Python (any project) as well as items scoped to myproject (any language), plus items scoped to both.
+
+**Porter stemmer**: FTS5 uses the Porter stemmer tokenizer. "testing" matches "test", "worktrees" matches "worktree". Context terms are stemmed before matching.
 
 ---
 
@@ -215,13 +243,16 @@ vidya feedback --type TYPE --detail TEXT [options]
 | `test_failed` | Decays confidence on matching items |
 | `test_passed` | No effect on knowledge items (recorded only) |
 
-**Output paths** (one of three):
+**Output paths** (one of four):
 
 ```
 Created new knowledge item: <uuid>        # new item, no existing overlap
 Merged into existing item: <uuid>         # feedback merged into existing item
 Updated existing items.                   # positive/failure feedback updated confidence
+Bundle <uuid> decomposed.                 # bundle broken apart; re-run to target a source item
 ```
+
+**Bundle decomposition**: if a `user_correction` matches a bundle item, Vidya decomposes the bundle — clearing `bundle_id` on all source items and setting the bundle's status to `superseded`. Re-run the same feedback to target the individual source item now that it is free.
 
 **Example — correction that creates a new item:**
 
@@ -391,6 +422,107 @@ vidya explain --item-id 07a48f57-d87f-4f7c-9955-57e8c2a4fa4f
 ```
 
 Use `vidya items` to find item IDs to inspect.
+
+---
+
+### `vidya maintain`
+
+Run maintenance: health check, stale item detection, optional archival.
+
+```
+vidya maintain [--language LANG] [--project PROJECT] [--archive] [--confirm]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--archive` | Include archive recommendations for stale items |
+| `--confirm` | Actually archive stale items (requires `--archive`) |
+
+Without `--confirm`, `--archive` shows what would be archived (dry run). Stale items are those with effective confidence below the LOW threshold that have not fired in over 30 days.
+
+---
+
+### `vidya evolve`
+
+Detect clusters of thematically related knowledge items and synthesize compound rules via LLM.
+
+```
+vidya evolve [--language LANG] [--framework FW] [--project PROJECT] [options]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--cluster-only` | false | Show clusters without synthesis |
+| `--dry-run` | false | Synthesize candidates without persisting them |
+| `--review` | false | Interactive review of pending candidates |
+| `--model` | — | Override LLM model (litellm model string) |
+| `--min-size` | 3 | Minimum cluster size |
+| `--overlap-threshold` | 0.35 | Minimum pairwise token overlap to connect two items |
+| `--min-cohesion` | 0.35 | Minimum average pairwise overlap to accept a cluster |
+
+**Three modes:**
+
+**1. Cluster detection only** (`--cluster-only`)
+
+Shows detected clusters without calling the LLM.
+
+```bash
+vidya evolve --cluster-only --language python --project myproject
+```
+
+```
+Found 2 cluster(s).
+
+Cluster 1: 4 item(s), cohesion=0.48
+  Scope:  {'language': 'python', 'framework': None, 'project': 'myproject'}
+  Theme:  pytest run test uv
+  - Always use uv run pytest not bare pytest
+  - Run full test suite before marking task complete
+  - ...
+```
+
+**2. Synthesis** (default, or `--dry-run`)
+
+Calls the configured LLM to compress each cluster into one compound rule. Persists a pending `evolution_candidate` per cluster (omitted on `--dry-run`).
+
+```bash
+vidya evolve --language python --project myproject
+```
+
+```
+Candidate synthesized:
+  Pattern:  Always use uv run pytest for Python test execution
+  Guidance: Always run `uv run pytest` (never bare pytest); run the full suite before marking any task complete.
+  Theme:    pytest run test uv
+  Cohesion: 0.48
+  ID:       3f8a...
+```
+
+**3. Review** (`--review`)
+
+Interactive review of pending candidates. For each candidate, shows synthesized rule, cohesion score, and source items, then prompts:
+
+```
+Action: [a]pprove  [e]dit  [r]eject  [s]kip  [q]uit
+```
+
+- `a` — promote to `bundle` knowledge item; source items tagged with `bundle_id`
+- `e` — open `$EDITOR` to edit guidance, then promote
+- `r` — reject; source items unchanged
+- `s` — skip for now; candidate remains pending
+- `q` — stop reviewing
+
+**LLM configuration via environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VIDYA_EVOLVE_MODEL` | `openai/gemma-4-26b-a4b-it-4bit` | litellm model string |
+| `VIDYA_EVOLVE_API_BASE` | `http://192.168.1.17:8099/v1` | OpenAI-compatible base URL |
+| `VIDYA_EVOLVE_API_KEY` | `omlx-1234` | Bearer token |
+
+For hosted models: set `VIDYA_EVOLVE_MODEL=claude-haiku-4-5` and leave `API_BASE`/`API_KEY` unset to use Anthropic's SDK path.
+
+**Threshold tuning**: defaults suit knowledge bases of 100+ items. For smaller bases use `--min-size 2 --overlap-threshold 0.3 --min-cohesion 0.3`.
 
 ---
 
@@ -704,6 +836,16 @@ Triggered by `test_failed`.
 1. FTS5 finds existing items with > 0.3 overlap.
 2. `update_on_failure` is applied: `base_confidence ×= 0.70`, `last_fired = now`.
 
+### Path 4: Bundle decomposition
+
+Triggered by `user_correction` when the best-matching item is a `bundle`.
+
+1. FTS5 finds the best-matching existing item.
+2. If that item is a bundle (`type = 'bundle'`), Vidya decomposes it: clears `bundle_id` on all source items, sets the bundle to `status = 'superseded'`.
+3. The feedback is not immediately applied to any source item — the caller must re-submit the same correction to now target the freed source item.
+
+This prevents a correction meant for one source rule from being silently absorbed by its aggregate bundle.
+
 ### Type classification
 
 Type is inferred automatically from the detail text by keyword detection:
@@ -717,6 +859,60 @@ Type is inferred automatically from the detail text by keyword detection:
 
 ---
 
+## Knowledge Evolution
+
+The `evolve` pipeline converts accumulated atomic rules into compound rules (bundles). It runs entirely offline except for the LLM synthesis step.
+
+### Pipeline stages
+
+```
+1. detect_clusters   — group active items by vocabulary overlap within scope
+2. synthesize_cluster — LLM compresses each cluster into one rule → evolution_candidate
+3. promote_candidate — human review approves: candidate becomes a bundle item
+   reject_candidate  — human review rejects: candidate marked rejected, sources untouched
+```
+
+### Cluster detection algorithm
+
+1. Query active non-bundle items matching the scope filter.
+2. Tokenize each item's `pattern + guidance` text (lowercase, strip punctuation).
+3. Group items by exact scope triple `(language, framework, project)`.
+4. For each pair within a scope group, compute **symmetric overlap**: `|A ∩ B| / min(|A|, |B|)`.
+5. Build an adjacency graph: connect items with overlap ≥ `--overlap-threshold`.
+6. Extract connected components (BFS).
+7. Reject components with fewer than `--min-size` members or average pairwise overlap below `--min-cohesion`.
+8. Compute theme tokens: tokens that appear in more than 50% of members.
+
+**Why symmetric overlap**: the smaller set drives the denominator, so a short specific rule can still connect to a longer related rule. A directional measure would miss these pairs.
+
+### Evolution candidates table
+
+Pending candidates live in `evolution_candidates` with `status = 'pending'`. After review:
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Awaiting human review |
+| `promoted` | Approved; bundle item created |
+| `rejected` | Rejected; source items untouched |
+
+### Bundle items
+
+A bundle item has `type = 'bundle'` and `source = 'evolution'`. Its `related_items` field holds a JSON array of source item IDs. Each source item gains a `bundle_id` pointing back to the bundle.
+
+`base_confidence` of the bundle = average `base_confidence` of its source items at promotion time.
+
+Bundles are excluded from cluster detection (`type != 'bundle'` filter) to avoid re-clustering noise.
+
+### Decomposition
+
+If a `user_correction` feedback matches a bundle, `learn.py` decomposes it before applying the correction. Decomposition:
+
+1. Clears `bundle_id = NULL` on all source items.
+2. Sets the bundle's `status = 'superseded'`.
+3. Returns a decomposed signal — the caller must re-submit the correction to target the now-free source item.
+
+---
+
 ## Database Tables
 
 All tables live in `~/.vidya/vidya.db` (WAL mode, foreign keys enforced).
@@ -724,20 +920,35 @@ All tables live in `~/.vidya/vidya.db` (WAL mode, foreign keys enforced).
 | Table | Purpose |
 |-------|---------|
 | `knowledge_items` | Active knowledge store. The primary table. |
-| `knowledge_fts` | FTS5 virtual table synced to knowledge_items via triggers |
+| `knowledge_fts` | FTS5 virtual table synced to knowledge_items via triggers (Porter stemmer) |
 | `task_records` | One row per `vidya_start_task` call |
 | `step_records` | One row per `vidya_record_step` call |
 | `feedback_records` | One row per `vidya_feedback` call |
 | `extraction_candidates` | Staging area before promotion to knowledge_items |
+| `evolution_candidates` | Synthesized cluster candidates pending human review |
+| `schema_migrations` | Tracks applied schema migrations (idempotent) |
 | `knowledge_archive` | Cold storage for archived/evicted items (JSON snapshots) |
 
 ### FTS5 sync
 
-The `knowledge_fts` table is kept in sync with `knowledge_items` by three SQLite triggers:
+The `knowledge_fts` table uses the **Porter stemmer tokenizer** (`tokenize = "porter unicode61"`). This means stemmed forms match: "testing" → "test", "worktrees" → "worktree", "adding" → "add".
+
+The table is kept in sync with `knowledge_items` by three SQLite triggers:
 
 - `knowledge_items_ai` — INSERT → insert into FTS
 - `knowledge_items_ad` — DELETE → delete from FTS
 - `knowledge_items_au` — UPDATE of `pattern`, `guidance`, or `explanation` → delete + re-insert in FTS
+
+### Schema migrations
+
+Applied migrations are tracked in `schema_migrations`:
+
+| Migration name | Tracked in `schema_migrations` | What it does |
+|----------------|--------------------------------|--------------|
+| `fts_porter` | yes | Rebuilds FTS index with Porter stemmer tokenizer |
+| `add_evolution` | no (uses `IF NOT EXISTS`) | Adds `bundle_id` column and `evolution_candidates` table |
+
+Migrations run automatically on `init_db`. `fts_porter` is tracked in `schema_migrations` for idempotency. `add_evolution` relies on SQLite `ALTER TABLE … IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` and is safe to re-run without tracking.
 
 ### Inspecting the database directly
 

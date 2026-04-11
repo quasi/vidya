@@ -54,8 +54,8 @@ def detect_clusters(
     framework: str | None = None,
     project: str | None = None,
     min_size: int = 3,
-    overlap_threshold: float = 0.4,
-    min_cohesion: float = 0.5,
+    overlap_threshold: float = 0.35,
+    min_cohesion: float = 0.35,
 ) -> list[Cluster]:
     """Detect clusters of thematically related knowledge items within a scope.
 
@@ -348,14 +348,28 @@ def synthesize_cluster(
                in the same order as cluster.item_ids (or a superset).
         db: Open SQLite connection with the Vidya schema.
         model: LLM model string.  Falls back to VIDYA_EVOLVE_MODEL env var,
-               then to 'claude-haiku-4-5'.
+               then to the built-in default (local OpenAI-compatible endpoint).
 
     Returns:
         EvolutionCandidate on success, None on unrecoverable failure.
+
+    Environment overrides:
+        VIDYA_EVOLVE_MODEL     — litellm model string
+        VIDYA_EVOLVE_API_BASE  — override OpenAI-compatible endpoint
+        VIDYA_EVOLVE_API_KEY   — override bearer token
     """
     import litellm  # local import — optional dependency
 
-    actual_model = model or os.environ.get("VIDYA_EVOLVE_MODEL") or "claude-haiku-4-5"
+    # Defaults point at the local OpenAI-compatible LLM. Override via env vars
+    # for hosted models (e.g. set VIDYA_EVOLVE_MODEL=claude-haiku-4-5 and
+    # leave VIDYA_EVOLVE_API_BASE/KEY unset to use Anthropic directly).
+    actual_model = (
+        model
+        or os.environ.get("VIDYA_EVOLVE_MODEL")
+        or "openai/gemma-4-26b-a4b-it-4bit"
+    )
+    actual_api_base = os.environ.get("VIDYA_EVOLVE_API_BASE") or "http://192.168.1.17:8099/v1"
+    actual_api_key = os.environ.get("VIDYA_EVOLVE_API_KEY") or "omlx-1234"
 
     system_msg = {
         "role": "system",
@@ -374,6 +388,14 @@ def synthesize_cluster(
         source_lines.append(f"{i}. Pattern: {item['pattern']}\n   Guidance: {item['guidance']}")
     user_content = "\n".join(source_lines)
 
+    # Only pass api_base/api_key for OpenAI-compatible routing. Providers
+    # like anthropic/ use their own SDK path and ignore these; passing them
+    # unconditionally still works but we keep the call minimal.
+    extra: dict[str, Any] = {}
+    if actual_model.startswith("openai/"):
+        extra["api_base"] = actual_api_base
+        extra["api_key"] = actual_api_key
+
     def _call_llm(user_text: str) -> dict | None:
         user_msg = {"role": "user", "content": user_text}
         try:
@@ -381,6 +403,7 @@ def synthesize_cluster(
                 model=actual_model,
                 messages=[system_msg, user_msg],
                 response_format={"type": "json_object"},
+                **extra,
             )
             raw = response.choices[0].message.content
             return json.loads(raw)

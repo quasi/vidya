@@ -482,9 +482,9 @@ def maintain(ctx, language, project, archive, confirm):
 @click.option("--model", default=None, help="Override LLM model for synthesis.")
 @click.option("--min-size", default=3, type=int, show_default=True,
               help="Minimum cluster size.")
-@click.option("--overlap-threshold", default=0.4, type=float, show_default=True,
+@click.option("--overlap-threshold", default=0.35, type=float, show_default=True,
               help="Minimum pairwise token overlap to connect items.")
-@click.option("--min-cohesion", default=0.5, type=float, show_default=True,
+@click.option("--min-cohesion", default=0.35, type=float, show_default=True,
               help="Minimum average pairwise overlap to accept a cluster.")
 @click.pass_context
 def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
