@@ -260,11 +260,12 @@ def _fetch_in_scope(
     scope_clauses = ["(language IS NULL AND runtime IS NULL AND framework IS NULL AND project IS NULL)"]
 
     if language:
-        scope_clauses.append("(language = ? AND runtime IS NULL AND framework IS NULL AND project IS NULL)")
+        # Project is a sub-scope of language: (python, vidya) items appear when querying language=python
+        scope_clauses.append("(language = ? AND runtime IS NULL AND framework IS NULL)")
         params.append(language)
 
         if runtime:
-            scope_clauses.append("(language = ? AND runtime = ? AND framework IS NULL AND project IS NULL)")
+            scope_clauses.append("(language = ? AND runtime = ? AND framework IS NULL)")
             params.extend([language, runtime])
 
     if framework:
@@ -272,19 +273,17 @@ def _fetch_in_scope(
         scope_clauses.append("(language IS NULL AND runtime IS NULL AND framework = ? AND project IS NULL)")
         params.append(framework)
         if language:
-            # Language-specific framework knowledge
-            scope_clauses.append("(language = ? AND runtime IS NULL AND framework = ? AND project IS NULL)")
+            # Language-specific framework knowledge — strict: python+canon ≠ rust+canon
+            scope_clauses.append("(language = ? AND runtime IS NULL AND framework = ?)")
             params.extend([language, framework])
             if runtime:
-                scope_clauses.append("(language = ? AND runtime = ? AND framework = ? AND project IS NULL)")
+                scope_clauses.append("(language = ? AND runtime = ? AND framework = ?)")
                 params.extend([language, runtime, framework])
 
     if project:
-        if language:
-            scope_clauses.append("(language = ? AND project = ?)")
-            params.extend([language, project])
-        # Language-independent project knowledge
-        scope_clauses.append("(language IS NULL AND project = ?)")
+        # All items for this project, regardless of language.
+        # project=vidya returns (python, vidya) items even without --language python.
+        scope_clauses.append("(project = ?)")
         params.append(project)
 
     where = " OR ".join(scope_clauses)

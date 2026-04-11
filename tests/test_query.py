@@ -272,3 +272,35 @@ def test_fts_special_chars_do_not_crash(db):
     assert isinstance(results, list)
     results = cascade_query(db, context="error AND handling OR *", language="python")
     assert isinstance(results, list)
+
+
+# --- Scope narrowing: language and project are additive, not restrictive ---
+
+def test_language_query_includes_language_project_items(db):
+    """language=python finds items tagged (python, vidya) without needing --project vidya."""
+    item_id = create_item(
+        db, pattern="worktrees virtual env leak", guidance="Prefix with VIRTUAL_ENV=",
+        item_type="precondition", language="python", project="vidya", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="worktrees virtual env leak", language="python")
+    assert item_id in [r.id for r in results]
+
+
+def test_project_query_includes_language_project_items(db):
+    """project=vidya finds items tagged (python, vidya) without needing --language python."""
+    item_id = create_item(
+        db, pattern="worktrees virtual env leak", guidance="Prefix with VIRTUAL_ENV=",
+        item_type="precondition", language="python", project="vidya", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="worktrees virtual env leak", project="vidya")
+    assert item_id in [r.id for r in results]
+
+
+def test_project_query_does_not_leak_other_projects(db):
+    """project=vidya does not return items tagged project=other."""
+    other_id = create_item(
+        db, pattern="worktrees virtual env leak", guidance="Other project advice",
+        item_type="precondition", language="python", project="other", base_confidence=0.8,
+    )
+    results = cascade_query(db, context="worktrees virtual env leak", project="vidya")
+    assert other_id not in [r.id for r in results]
