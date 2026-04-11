@@ -54,11 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_last_fired
     ON knowledge_items(last_fired);
 
 -- Standalone FTS index (item_id maps back to knowledge_items.id)
+-- Uses porter stemmer so "worktree"/"worktrees", "add"/"adding", etc. match correctly.
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     item_id UNINDEXED,
     pattern,
     guidance,
-    explanation
+    explanation,
+    tokenize = "porter unicode61"
 );
 
 -- FTS sync triggers — keep knowledge_fts in step with knowledge_items
@@ -191,6 +193,11 @@ CREATE TABLE IF NOT EXISTS knowledge_archive (
     original_data TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS evolution_candidates (
     id TEXT PRIMARY KEY,
     timestamp TEXT NOT NULL,
@@ -207,6 +214,45 @@ CREATE TABLE IF NOT EXISTS evolution_candidates (
     review_notes TEXT
 );
 """
+
+
+def migrate_fts_porter(conn: sqlite3.Connection) -> None:
+    """Migrate FTS index to use Porter stemmer tokenizer.
+
+    FTS5 tokenizer is fixed at creation time — can't ALTER it.
+    Must drop and recreate the virtual table and its triggers, then repopulate.
+    Idempotent: tracked in schema_migrations table.
+    """
+    # Ensure schema_migrations exists (may not on very old DBs)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations "
+        "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT name FROM schema_migrations WHERE name = 'fts_porter'"
+    ).fetchone()
+    if row:
+        return  # Already applied
+
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS knowledge_items_ai;
+        DROP TRIGGER IF EXISTS knowledge_items_ad;
+        DROP TRIGGER IF EXISTS knowledge_items_au;
+        DROP TABLE IF EXISTS knowledge_fts;
+    """)
+    # _DDL recreates the FTS table (now with porter tokenizer) and triggers
+    conn.executescript(_DDL)
+    # Repopulate from existing items
+    conn.execute(
+        "INSERT INTO knowledge_fts(item_id, pattern, guidance, explanation) "
+        "SELECT id, pattern, guidance, explanation FROM knowledge_items"
+    )
+    conn.execute(
+        "INSERT INTO schema_migrations(name, applied_at) VALUES ('fts_porter', datetime('now'))"
+    )
+    conn.commit()
 
 
 def migrate_add_evolution(conn: sqlite3.Connection) -> None:
@@ -240,4 +286,5 @@ def init_db(path: str) -> sqlite3.Connection:
     # idx_bundle_id; on fresh DBs the ALTER fails silently and executescript(_DDL)
     # inside the migration creates everything from scratch.
     migrate_add_evolution(conn)
+    migrate_fts_porter(conn)
     return conn
