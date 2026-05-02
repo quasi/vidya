@@ -173,3 +173,54 @@ def test_staleness_fired_item_not_untested(db):
     update_item(db, item_id, fire_count=5)
     report = run_audit(db)
     assert item_id not in report.staleness["untested_ids"]
+
+
+def test_coverage_groups_by_project(db):
+    create_item(db, pattern="p1", guidance="g", item_type="convention",
+                base_confidence=0.7, source="seed", project="vidya")
+    create_item(db, pattern="p2", guidance="g", item_type="convention",
+                base_confidence=0.7, source="seed", project="vidya")
+    create_item(db, pattern="p3", guidance="g", item_type="convention",
+                base_confidence=0.7, source="seed", project="canon")
+    report = run_audit(db)
+    projects = {c["project"]: c["count"] for c in report.coverage if c.get("project")}
+    assert projects.get("vidya") == 2
+    assert projects.get("canon") == 1
+
+
+def test_recommendations_contradicted_items_first(db):
+    """Contradicted items produce the highest-priority recommendation."""
+    item_id = create_item(db, pattern="bad rule", guidance="g",
+                          item_type="convention", base_confidence=0.5, source="seed")
+    update_item(db, item_id, fail_count=3, success_count=1)
+    report = run_audit(db)
+    assert any("explain --item-id" in r for r in report.recommendations)
+    # contradicted rec comes before evolution rec
+    rec_texts = " | ".join(report.recommendations)
+    explain_pos = rec_texts.find("explain --item-id")
+    evolve_pos = rec_texts.find("evolve --review")
+    if evolve_pos >= 0:
+        assert explain_pos < evolve_pos
+
+
+def test_recommendations_empty_when_healthy(db):
+    """No recommendations when knowledge base is completely healthy."""
+    item_id = create_item(db, pattern="unique solo term xyz", guidance="g",
+                          item_type="convention", base_confidence=0.7, source="seed")
+    update_item(db, item_id, fire_count=5, success_count=3, fail_count=0)
+    report = run_audit(db)
+    assert report.recommendations == []
+
+
+def test_recommendations_includes_evolve_review_when_pending(db):
+    """Pending evolution candidates trigger evolve --review recommendation."""
+    db.execute(
+        "INSERT INTO evolution_candidates "
+        "(id, timestamp, pattern, guidance, source_item_ids, cluster_theme, cohesion_score, synthesis_model) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(),
+         "compound rule", "guidance text", "[]", "theme", 0.4, "model"),
+    )
+    db.commit()
+    report = run_audit(db)
+    assert any("evolve --review" in r for r in report.recommendations)

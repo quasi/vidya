@@ -176,6 +176,46 @@ def _build_staleness(db: sqlite3.Connection, where: str, params: list) -> dict[s
     }
 
 
+def _build_coverage(db: sqlite3.Connection, where: str, params: list) -> list[dict]:
+    rows = db.execute(
+        f"SELECT project, COUNT(*) as count FROM knowledge_items WHERE {where} "
+        f"GROUP BY project ORDER BY count DESC",
+        params,
+    ).fetchall()
+    return [{"project": r["project"], "count": r["count"]} for r in rows]
+
+
+def _build_recommendations(report: "AuditReport") -> list[str]:
+    recs = []
+    # Priority 1: contradicted items (actively harmful)
+    for item_id in report.staleness["contradicted_ids"]:
+        recs.append(f"vidya explain --item-id {item_id}  # contradicted: fail > success")
+    # Priority 2: pending evolution candidates
+    if report.candidates["evolution_pending"] > 0:
+        n = report.candidates["evolution_pending"]
+        recs.append(
+            f"vidya evolve --review  # {n} candidate(s) pending — run in interactive terminal"
+        )
+    # Priority 3: pending extraction candidates
+    if report.candidates["extraction_pending"] > 0:
+        n = report.candidates["extraction_pending"]
+        recs.append(f"vidya items --min-confidence 0  # {n} extraction candidate(s) pending review")
+    # Priority 4: loose clusters (merge opportunities)
+    if report.clusters_loose:
+        n = len(report.clusters_loose)
+        recs.append(
+            f"vidya evolve --min-size 2 --overlap-threshold 0.3 --min-cohesion 0.3"
+            f"  # {n} cluster(s) at loose thresholds"
+        )
+    # Priority 5: broken bundle lineage (informational)
+    if report.bundles["broken_lineage_count"] > 0:
+        n = report.bundles["broken_lineage_count"]
+        recs.append(
+            f"# {n} bundle(s) have no recorded source lineage (related_items empty) — informational only"
+        )
+    return recs
+
+
 def run_audit(
     db: sqlite3.Connection,
     language: str | None = None,
@@ -188,13 +228,18 @@ def run_audit(
     overview = _build_overview(db, where, params)
     bundles = _build_bundles(db, overview["total_items"])
     clusters_default, clusters_loose = _build_clusters(db, language, runtime, framework, project)
-    return AuditReport(
+    candidates = _build_candidates(db)
+    staleness = _build_staleness(db, where, params)
+    coverage = _build_coverage(db, where, params)
+    report = AuditReport(
         overview=overview,
         bundles=bundles,
         clusters_default=clusters_default,
         clusters_loose=clusters_loose,
-        candidates=_build_candidates(db),
-        staleness=_build_staleness(db, where, params),
-        coverage=[],
+        candidates=candidates,
+        staleness=staleness,
+        coverage=coverage,
         recommendations=[],
     )
+    report.recommendations = _build_recommendations(report)
+    return report
