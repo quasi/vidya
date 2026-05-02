@@ -69,3 +69,41 @@ def test_bundle_broken_lineage_detected(db):
     # related_items defaults to '[]' — broken lineage
     report = run_audit(db)
     assert report.bundles["broken_lineage_count"] == 1
+
+
+def test_clusters_default_empty_when_no_overlap(db):
+    """Items with fully distinct vocabulary produce no clusters at default thresholds."""
+    # Each item has a completely disjoint token set — no shared words whatsoever.
+    items = [
+        ("apple mango papaya guava",        "citrus ripe tropical harvest"),
+        ("wrench hammer chisel lathe",       "torque drill fasten bolt"),
+        ("neutron proton electron quark",    "orbit decay fission nucleus"),
+        ("sonnet haiku limerick stanza",     "rhyme meter verse couplet"),
+    ]
+    for pattern, guidance in items:
+        create_item(db, pattern=pattern, guidance=guidance, item_type="convention",
+                    base_confidence=0.7, source="seed")
+    report = run_audit(db)
+    assert report.clusters_default == []
+
+
+def test_clusters_loose_finds_similar_items(db):
+    """Items sharing significant vocabulary cluster at loose thresholds."""
+    for i in range(3):
+        create_item(db, pattern="when vidya evolve runs use detect clusters",
+                    guidance=f"guidance variant {i}", item_type="convention",
+                    base_confidence=0.7, source="seed", project="vidya")
+    report = run_audit(db, project="vidya")
+    # At loose thresholds (min_size=2) at least one cluster should form
+    assert len(report.clusters_loose) >= 1
+    cluster = report.clusters_loose[0]
+    assert "item_ids" in cluster
+    assert "cohesion" in cluster
+    assert "theme_tokens" in cluster
+
+
+def test_cluster_sections_are_dicts_not_dataclasses(db):
+    """Cluster summaries are plain dicts (JSON-serialisable)."""
+    report = run_audit(db)
+    for c in report.clusters_default + report.clusters_loose:
+        assert isinstance(c, dict)

@@ -6,6 +6,11 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
+from vidya.evolve import detect_clusters
+
+_DEFAULT_THRESHOLDS = dict(min_size=3, overlap_threshold=0.35, min_cohesion=0.35)
+_LOOSE_THRESHOLDS = dict(min_size=2, overlap_threshold=0.3, min_cohesion=0.3)
+
 
 @dataclass
 class AuditReport:
@@ -103,6 +108,29 @@ def _build_bundles(db: sqlite3.Connection, total_items: int) -> dict[str, Any]:
     }
 
 
+def _cluster_to_dict(c) -> dict:
+    return {
+        "item_ids": c.item_ids,
+        "cohesion": round(c.cohesion, 3),
+        "theme_tokens": c.theme_tokens,
+        "scope": c.scope,
+    }
+
+
+def _build_clusters(
+    db: sqlite3.Connection,
+    language: str | None,
+    runtime: str | None,
+    framework: str | None,
+    project: str | None,
+) -> tuple[list[dict], list[dict]]:
+    # detect_clusters does not accept runtime
+    kw = dict(language=language, framework=framework, project=project)
+    default = [_cluster_to_dict(c) for c in detect_clusters(db, **kw, **_DEFAULT_THRESHOLDS)]
+    loose = [_cluster_to_dict(c) for c in detect_clusters(db, **kw, **_LOOSE_THRESHOLDS)]
+    return default, loose
+
+
 def run_audit(
     db: sqlite3.Connection,
     language: str | None = None,
@@ -114,11 +142,12 @@ def run_audit(
     where, params = _build_scope_filter(language, runtime, framework, project)
     overview = _build_overview(db, where, params)
     bundles = _build_bundles(db, overview["total_items"])
+    clusters_default, clusters_loose = _build_clusters(db, language, runtime, framework, project)
     return AuditReport(
         overview=overview,
         bundles=bundles,
-        clusters_default=[],
-        clusters_loose=[],
+        clusters_default=clusters_default,
+        clusters_loose=clusters_loose,
         candidates={"evolution_pending": 0, "extraction_pending": 0, "oldest_pending_days": None},
         staleness={"untested_count": 0, "contradicted_count": 0, "untested_ids": [], "contradicted_ids": []},
         coverage=[],
