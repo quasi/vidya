@@ -4,6 +4,7 @@
 import json as _json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from vidya.evolve import detect_clusters
@@ -131,6 +132,50 @@ def _build_clusters(
     return default, loose
 
 
+def _build_candidates(db: sqlite3.Connection) -> dict[str, Any]:
+    evo_pending = db.execute(
+        "SELECT COUNT(*), MIN(timestamp) FROM evolution_candidates WHERE status = 'pending'"
+    ).fetchone()
+    ext_pending = db.execute(
+        "SELECT COUNT(*), MIN(timestamp) FROM extraction_candidates WHERE status = 'pending'"
+    ).fetchone()
+
+    oldest_ts = None
+    for row in [evo_pending, ext_pending]:
+        if row[1] and (oldest_ts is None or row[1] < oldest_ts):
+            oldest_ts = row[1]
+
+    oldest_days = None
+    if oldest_ts:
+        ts = datetime.fromisoformat(oldest_ts)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        oldest_days = (datetime.now(timezone.utc) - ts).days
+
+    return {
+        "evolution_pending": evo_pending[0],
+        "extraction_pending": ext_pending[0],
+        "oldest_pending_days": oldest_days,
+    }
+
+
+def _build_staleness(db: sqlite3.Connection, where: str, params: list) -> dict[str, Any]:
+    rows = db.execute(
+        f"SELECT id, fire_count, fail_count, success_count "
+        f"FROM knowledge_items WHERE {where}",
+        params,
+    ).fetchall()
+
+    untested_ids = [r["id"] for r in rows if r["fire_count"] == 0]
+    contradicted_ids = [r["id"] for r in rows if r["fail_count"] > r["success_count"]]
+    return {
+        "untested_count": len(untested_ids),
+        "contradicted_count": len(contradicted_ids),
+        "untested_ids": untested_ids,
+        "contradicted_ids": contradicted_ids,
+    }
+
+
 def run_audit(
     db: sqlite3.Connection,
     language: str | None = None,
@@ -148,8 +193,8 @@ def run_audit(
         bundles=bundles,
         clusters_default=clusters_default,
         clusters_loose=clusters_loose,
-        candidates={"evolution_pending": 0, "extraction_pending": 0, "oldest_pending_days": None},
-        staleness={"untested_count": 0, "contradicted_count": 0, "untested_ids": [], "contradicted_ids": []},
+        candidates=_build_candidates(db),
+        staleness=_build_staleness(db, where, params),
         coverage=[],
         recommendations=[],
     )

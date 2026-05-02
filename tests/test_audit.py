@@ -113,3 +113,63 @@ def test_audit_with_runtime_filter_does_not_crash(db):
     """runtime filter applies to scope but must not leak into detect_clusters()."""
     report = run_audit(db, runtime="cpython")
     assert isinstance(report, AuditReport)
+
+
+import uuid
+from datetime import datetime, timezone
+
+
+def test_candidates_counts_pending_evolution(db):
+    """Pending evolution candidates are counted."""
+    db.execute(
+        "INSERT INTO evolution_candidates "
+        "(id, timestamp, pattern, guidance, source_item_ids, cluster_theme, cohesion_score, synthesis_model) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(),
+         "test pattern", "test guidance", "[]", "theme", 0.5, "test-model"),
+    )
+    db.commit()
+    report = run_audit(db)
+    assert report.candidates["evolution_pending"] == 1
+
+
+def test_candidates_counts_pending_extraction(db):
+    """Pending extraction candidates are counted."""
+    db.execute(
+        "INSERT INTO extraction_candidates "
+        "(id, timestamp, pattern, guidance, type, extraction_method, evidence) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(),
+         "test pattern", "test guidance", "convention", "feedback", "[]"),
+    )
+    db.commit()
+    report = run_audit(db)
+    assert report.candidates["extraction_pending"] == 1
+
+
+def test_staleness_untested_items(db):
+    """Items with fire_count=0 are flagged as untested."""
+    item_id = create_item(db, pattern="untested rule", guidance="g",
+                          item_type="convention", base_confidence=0.7, source="seed")
+    report = run_audit(db)
+    assert report.staleness["untested_count"] == 1
+    assert item_id in report.staleness["untested_ids"]
+
+
+def test_staleness_contradicted_items(db):
+    """Items with fail_count > success_count are flagged as contradicted."""
+    item_id = create_item(db, pattern="bad rule", guidance="g",
+                          item_type="convention", base_confidence=0.5, source="seed")
+    update_item(db, item_id, fail_count=3, success_count=1)
+    report = run_audit(db)
+    assert report.staleness["contradicted_count"] == 1
+    assert item_id in report.staleness["contradicted_ids"]
+
+
+def test_staleness_fired_item_not_untested(db):
+    """Item with fire_count > 0 is not in untested."""
+    item_id = create_item(db, pattern="fired rule", guidance="g",
+                          item_type="convention", base_confidence=0.7, source="seed")
+    update_item(db, item_id, fire_count=5)
+    report = run_audit(db)
+    assert item_id not in report.staleness["untested_ids"]
