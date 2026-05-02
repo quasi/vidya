@@ -729,7 +729,16 @@ def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
 
     # --- Full pipeline (or dry-run) ---
     created = []
-    for cluster in clusters:
+    if not use_json:
+        click.echo(f"Found {len(clusters)} cluster(s). Synthesizing...")
+    for i, cluster in enumerate(clusters, start=1):
+        if not use_json:
+            theme = " ".join(cluster.theme_tokens[:5]) or "(no theme tokens)"
+            click.echo(
+                f"  [{i}/{len(clusters)}] {len(cluster.item_ids)} items,"
+                f" cohesion={cluster.cohesion:.2f}, theme: {theme} ...",
+                nl=False,
+            )
         items = []
         for iid in cluster.item_ids:
             try:
@@ -737,6 +746,8 @@ def evolve(ctx, language, framework, project, cluster_only, dry_run, review,
             except KeyError:
                 pass
         candidate = synthesize_cluster(cluster, items, db, model=model)
+        if not use_json:
+            click.echo(" done" if candidate is not None else " failed")
         if candidate is None:
             continue
         if dry_run:
