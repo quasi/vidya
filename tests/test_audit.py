@@ -224,3 +224,49 @@ def test_recommendations_includes_evolve_review_when_pending(db):
     db.commit()
     report = run_audit(db)
     assert any("evolve --review" in r for r in report.recommendations)
+
+
+# ---------------------------------------------------------------------------
+# CLI tests
+# ---------------------------------------------------------------------------
+from click.testing import CliRunner
+from vidya.cli import main
+import json as _json
+
+
+@pytest.fixture
+def cli_db(tmp_path, monkeypatch):
+    """Fixture that points the CLI _db() to a temp database."""
+    from vidya.schema import init_db as _init_db
+    db_path = str(tmp_path / "test.db")
+    conn = _init_db(db_path)
+    conn.close()
+    monkeypatch.setenv("VIDYA_DB_PATH", db_path)
+    return db_path
+
+
+def test_cli_audit_text_output(cli_db):
+    runner = CliRunner()
+    result = runner.invoke(main, ["audit"])
+    assert result.exit_code == 0
+    assert "Overview" in result.output or "Items:" in result.output
+
+
+def test_cli_audit_json_output(cli_db):
+    runner = CliRunner()
+    result = runner.invoke(main, ["--json", "audit"])
+    assert result.exit_code == 0
+    data = _json.loads(result.output)
+    assert "overview" in data
+    assert "bundles" in data
+    assert "candidates" in data
+    assert "staleness" in data
+    assert "recommendations" in data
+
+
+def test_cli_audit_project_filter(cli_db):
+    runner = CliRunner()
+    result = runner.invoke(main, ["--json", "audit", "--project", "vidya"])
+    assert result.exit_code == 0
+    data = _json.loads(result.output)
+    assert data["overview"]["total_items"] == 0  # empty db, filtered

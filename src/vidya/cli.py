@@ -1,6 +1,7 @@
 """CLI tool — thin wrapper over the Vidya library."""
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -26,11 +27,12 @@ from vidya.evolve import (
 )
 
 
-_DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
+_DEFAULT_DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
 
 
 def _db():
-    return init_db(_DB_PATH)
+    db_path = os.environ.get("VIDYA_DB_PATH", _DEFAULT_DB_PATH)
+    return init_db(db_path)
 
 
 @click.group()
@@ -467,6 +469,80 @@ def maintain(ctx, language, project, archive, confirm):
         elif archive_result.get("would_archive_count", 0) > 0:
             click.echo(f"\nWould archive {archive_result['would_archive_count']} item(s). "
                        f"Use --confirm to execute.")
+
+
+@main.command()
+@click.option("--language", default=None, help="Scope filter: language.")
+@click.option("--runtime", default=None, help="Scope filter: runtime.")
+@click.option("--framework", default=None, help="Scope filter: framework.")
+@click.option("--project", default=None, help="Scope filter: project.")
+@click.pass_context
+def audit(ctx, language, runtime, framework, project):
+    """Run a read-only diagnostic audit of the knowledge base."""
+    import dataclasses
+    from vidya.audit import run_audit
+
+    db = _db()
+    report = run_audit(db, language=language, runtime=runtime,
+                       framework=framework, project=project)
+
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(dataclasses.asdict(report)))
+        return
+
+    ov = report.overview
+    bc = ov["by_confidence"]
+    click.echo("=== Knowledge Base Audit ===\n")
+
+    click.echo("Overview")
+    click.echo(f"  Items:   {ov['total_items']}  "
+               f"(HIGH={bc['HIGH']} MED={bc['MEDIUM']} LOW={bc['LOW']})")
+    by_type_str = "  ".join(f"{k}={v}" for k, v in ov["by_type"].items())
+    click.echo(f"  By type: {by_type_str or '—'}")
+    by_scope = ov["by_scope"]
+    by_scope_str = "  ".join(f"{k}={v}" for k, v in by_scope.items())
+    click.echo(f"  By scope: {by_scope_str}")
+
+    b = report.bundles
+    click.echo("\nBundles")
+    click.echo(f"  Count: {b['count']}  Merge rate: {b['merge_rate']}%  "
+               f"Broken lineage: {b['broken_lineage_count']}  "
+               f"Items consumed: {b['items_consumed']}")
+
+    nd = len(report.clusters_default)
+    nl = len(report.clusters_loose)
+    click.echo("\nClusters")
+    click.echo(f"  Default thresholds (min_size=3, overlap=0.35, cohesion=0.35): {nd} cluster(s)")
+    click.echo(f"  Loose thresholds   (min_size=2, overlap=0.30, cohesion=0.30): {nl} cluster(s)")
+    for c in report.clusters_loose[:5]:
+        click.echo(f"    cohesion={c['cohesion']}  items={len(c['item_ids'])}  "
+                   f"theme={' '.join(c['theme_tokens'][:5])}")
+
+    cand = report.candidates
+    click.echo("\nCandidate Backlog")
+    click.echo(f"  Evolution pending:  {cand['evolution_pending']}")
+    click.echo(f"  Extraction pending: {cand['extraction_pending']}")
+    if cand.get("oldest_pending_days") is not None:
+        click.echo(f"  Oldest pending:    {cand['oldest_pending_days']} days")
+
+    st = report.staleness
+    click.echo("\nStaleness")
+    click.echo(f"  Untested (fire_count=0): {st['untested_count']}")
+    click.echo(f"  Contradicted (fail>success): {st['contradicted_count']}")
+
+    cov = [c for c in report.coverage if c.get("project")]
+    if cov:
+        click.echo("\nCoverage (top projects)")
+        for c in cov[:10]:
+            click.echo(f"  {c['project']}: {c['count']} item(s)")
+
+    recs = report.recommendations
+    click.echo("\nRecommendations")
+    if recs:
+        for i, r in enumerate(recs, start=1):
+            click.echo(f"  {i}. {r}")
+    else:
+        click.echo("  none — knowledge base is healthy")
 
 
 @main.command()
