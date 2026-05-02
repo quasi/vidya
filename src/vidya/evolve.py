@@ -19,6 +19,11 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+# Process-level sticky flag: once the primary (local) LLM fails a transport
+# call, later calls in the same process skip it and go straight to fallback.
+# Avoids paying the primary timeout on every cluster when the server is down.
+_PRIMARY_DEAD = False
+
 
 @dataclass
 class Cluster:
@@ -354,11 +359,25 @@ def synthesize_cluster(
         EvolutionCandidate on success, None on unrecoverable failure.
 
     Environment overrides:
-        VIDYA_EVOLVE_MODEL     — litellm model string
-        VIDYA_EVOLVE_API_BASE  — override OpenAI-compatible endpoint
-        VIDYA_EVOLVE_API_KEY   — override bearer token
+        VIDYA_EVOLVE_MODEL           — litellm model string
+        VIDYA_EVOLVE_API_BASE        — override OpenAI-compatible endpoint
+        VIDYA_EVOLVE_API_KEY         — override bearer token
+        VIDYA_EVOLVE_FALLBACK_MODEL  — fallback model when local LLM is down
+                                       (default: openrouter/google/gemma-4-26b-a4b-it;
+                                       requires OPENROUTER_API_KEY)
     """
     import litellm  # local import — optional dependency
+
+    # Load .env from two locations (later load wins for already-set vars):
+    # 1. ~/.vidya/.env  — user-level config, works regardless of cwd (global CLI install)
+    # 2. cwd upward     — project-local .env for development workflows
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+        load_dotenv(Path.home() / ".vidya" / ".env")
+        load_dotenv()
+    except ImportError:
+        pass
 
     # Defaults point at the local OpenAI-compatible LLM. Override via env vars
     # for hosted models (e.g. set VIDYA_EVOLVE_MODEL=claude-haiku-4-5 and
@@ -370,6 +389,11 @@ def synthesize_cluster(
     )
     actual_api_base = os.environ.get("VIDYA_EVOLVE_API_BASE") or "http://192.168.1.17:8099/v1"
     actual_api_key = os.environ.get("VIDYA_EVOLVE_API_KEY") or "omlx-1234"
+
+    fallback_model = os.environ.get(
+        "VIDYA_EVOLVE_FALLBACK_MODEL",
+        "openrouter/google/gemma-4-26b-a4b-it",
+    )
 
     system_msg = {
         "role": "system",
@@ -388,35 +412,70 @@ def synthesize_cluster(
         source_lines.append(f"{i}. Pattern: {item['pattern']}\n   Guidance: {item['guidance']}")
     user_content = "\n".join(source_lines)
 
-    # Only pass api_base/api_key for OpenAI-compatible routing. Providers
-    # like anthropic/ use their own SDK path and ignore these; passing them
-    # unconditionally still works but we keep the call minimal.
-    extra: dict[str, Any] = {}
-    if actual_model.startswith("openai/"):
-        extra["api_base"] = actual_api_base
-        extra["api_key"] = actual_api_key
+    # Timeouts keep a dead local endpoint from hanging evolve forever —
+    # without these, the primary call never fails and fallback never fires.
+    primary_timeout = float(os.environ.get("VIDYA_EVOLVE_TIMEOUT", "15"))
+    fallback_timeout = float(os.environ.get("VIDYA_EVOLVE_FALLBACK_TIMEOUT", "60"))
 
-    def _call_llm(user_text: str) -> dict | None:
+    def _build_extra(m: str) -> dict[str, Any]:
+        # Only pass api_base/api_key for local OpenAI-compatible routing.
+        # openrouter/, anthropic/, etc. use their own provider SDK paths
+        # and read their own env vars (OPENROUTER_API_KEY, etc.).
+        if m.startswith("openai/"):
+            return {"api_base": actual_api_base, "api_key": actual_api_key}
+        return {}
+
+    def _call_llm(m: str, user_text: str, timeout: float) -> tuple[dict | None, bool]:
+        """Call the LLM. Returns (parsed_json_or_None, transport_failed)."""
         user_msg = {"role": "user", "content": user_text}
         try:
             response = litellm.completion(
-                model=actual_model,
+                model=m,
                 messages=[system_msg, user_msg],
                 response_format={"type": "json_object"},
-                **extra,
+                timeout=timeout,
+                **_build_extra(m),
             )
             raw = response.choices[0].message.content
-            return json.loads(raw)
+            return json.loads(raw), False
         except json.JSONDecodeError:
-            return None  # Caller handles retry
+            return None, False  # Model responded but not valid JSON
         except Exception as exc:
-            logger.warning("LLM call failed for synthesize_cluster: %s", exc)
-            return None  # Unrecoverable
+            logger.warning("LLM call failed for synthesize_cluster (%s): %s", m, exc)
+            return None, True  # Transport/connection error — eligible for fallback
 
-    # First attempt; retry once with explicit JSON reminder on failure
-    parsed = _call_llm(user_content)
-    if parsed is None:
-        parsed = _call_llm(user_content + "\n\nrespond with valid JSON only")
+    global _PRIMARY_DEAD
+
+    # If an earlier call this session already discovered the primary is down,
+    # skip it entirely and use the fallback straight away.
+    if _PRIMARY_DEAD and fallback_model:
+        parsed, transport_failed = None, True
+    else:
+        parsed, transport_failed = _call_llm(actual_model, user_content, primary_timeout)
+        if parsed is None and not transport_failed:
+            parsed, transport_failed = _call_llm(
+                actual_model, user_content + "\n\nrespond with valid JSON only", primary_timeout
+            )
+        if transport_failed:
+            _PRIMARY_DEAD = True  # mark dead for the rest of the process
+
+    # Fall back to OpenRouter if the primary model is unreachable
+    if parsed is None and transport_failed and fallback_model:
+        if os.environ.get("OPENROUTER_API_KEY") or not fallback_model.startswith("openrouter/"):
+            logger.info("Using fallback model %s", fallback_model)
+            parsed, _ = _call_llm(fallback_model, user_content, fallback_timeout)
+            if parsed is None:
+                parsed, _ = _call_llm(
+                    fallback_model, user_content + "\n\nrespond with valid JSON only", fallback_timeout
+                )
+            if parsed is not None:
+                actual_model = fallback_model  # recorded in synthesis_model column
+        else:
+            logger.warning(
+                "Primary LLM unreachable and OPENROUTER_API_KEY not set — "
+                "cannot fall back to %s", fallback_model,
+            )
+
     if parsed is None:
         return None
 
