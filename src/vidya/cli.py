@@ -1,5 +1,6 @@
 """CLI tool — thin wrapper over the Vidya library."""
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,7 @@ from vidya.evolve import (
     promote_candidate as promote_evolution_candidate,
     reject_candidate,
 )
+from vidya.audit import run_audit
 
 
 _DEFAULT_DB_PATH = str(Path.home() / ".vidya" / "vidya.db")
@@ -479,9 +481,6 @@ def maintain(ctx, language, project, archive, confirm):
 @click.pass_context
 def audit(ctx, language, runtime, framework, project):
     """Run a read-only diagnostic audit of the knowledge base."""
-    import dataclasses
-    from vidya.audit import run_audit
-
     db = _db()
     report = run_audit(db, language=language, runtime=runtime,
                        framework=framework, project=project)

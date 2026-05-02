@@ -226,6 +226,20 @@ def test_recommendations_includes_evolve_review_when_pending(db):
     assert any("evolve --review" in r for r in report.recommendations)
 
 
+def test_recommendations_includes_extraction_review_when_pending(db):
+    """Pending extraction candidates trigger items review recommendation."""
+    db.execute(
+        "INSERT INTO extraction_candidates "
+        "(id, timestamp, pattern, guidance, type, extraction_method, evidence) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(),
+         "feedback pattern", "feedback guidance", "convention", "feedback", "[]"),
+    )
+    db.commit()
+    report = run_audit(db)
+    assert any("items --min-confidence 0" in r for r in report.recommendations)
+
+
 # ---------------------------------------------------------------------------
 # CLI tests
 # ---------------------------------------------------------------------------
@@ -257,11 +271,9 @@ def test_cli_audit_json_output(cli_db):
     result = runner.invoke(main, ["--json", "audit"])
     assert result.exit_code == 0
     data = _json.loads(result.output)
-    assert "overview" in data
-    assert "bundles" in data
-    assert "candidates" in data
-    assert "staleness" in data
-    assert "recommendations" in data
+    for key in ("overview", "bundles", "clusters_default", "clusters_loose",
+                "candidates", "staleness", "coverage", "recommendations"):
+        assert key in data
 
 
 def test_cli_audit_project_filter(cli_db):
