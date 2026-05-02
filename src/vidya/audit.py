@@ -94,7 +94,7 @@ def _build_bundles(db: sqlite3.Connection, total_items: int) -> dict[str, Any]:
     count = len(bundles)
     broken = sum(
         1 for b in bundles
-        if not b["related_items"] or _json.loads(b["related_items"]) == []
+        if b["related_items"] is None or _json.loads(b["related_items"]) == []
     )
     consumed = db.execute(
         "SELECT COUNT(*) FROM knowledge_items WHERE bundle_id IS NOT NULL AND status = 'active'"

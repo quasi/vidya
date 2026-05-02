@@ -107,3 +107,9 @@ def test_cluster_sections_are_dicts_not_dataclasses(db):
     report = run_audit(db)
     for c in report.clusters_default + report.clusters_loose:
         assert isinstance(c, dict)
+
+
+def test_audit_with_runtime_filter_does_not_crash(db):
+    """runtime filter applies to scope but must not leak into detect_clusters()."""
+    report = run_audit(db, runtime="cpython")
+    assert isinstance(report, AuditReport)
