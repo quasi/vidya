@@ -1,6 +1,7 @@
 """CRUD operations for all Vidya tables. All functions take db: Connection first."""
 
 import json
+import random
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -367,3 +368,137 @@ def archive_item(db: sqlite3.Connection, item_id: str, reason: str) -> None:
         db.execute(
             "UPDATE knowledge_items SET status = 'archived' WHERE id = ?", (item_id,)
         )
+
+
+def create_random_audit_session(
+    db: sqlite3.Connection,
+    sample_size: int = 10,
+    language: str | None = None,
+    runtime: str | None = None,
+    framework: str | None = None,
+    project: str | None = None,
+) -> dict[str, Any]:
+    conditions = ["status = 'active'"]
+    params: list[Any] = []
+    if language:
+        conditions.append("language = ?")
+        params.append(language)
+    if runtime:
+        conditions.append("runtime = ?")
+        params.append(runtime)
+    if framework:
+        conditions.append("framework = ?")
+        params.append(framework)
+    if project:
+        conditions.append("project = ?")
+        params.append(project)
+
+    where = " AND ".join(conditions)
+    rows = db.execute(
+        f"""
+        SELECT id, pattern, guidance, type, language, runtime, framework, project, base_confidence
+        FROM knowledge_items
+        WHERE {where}
+        """,
+        params,
+    ).fetchall()
+    if len(rows) < sample_size:
+        raise ValueError(
+            f"Need at least {sample_size} active items for random audit; found {len(rows)}."
+        )
+
+    sampled_rows = random.sample(list(rows), sample_size)
+    session_id = _new_id()
+    with db:
+        db.execute(
+            """
+            INSERT INTO audit_sessions
+                (id, created_at, language, runtime, framework, project, sample_size)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, _now(), language, runtime, framework, project, sample_size),
+        )
+        for index, row in enumerate(sampled_rows, start=1):
+            db.execute(
+                """
+                INSERT INTO audit_session_items(session_id, item_id, sequence)
+                VALUES (?, ?, ?)
+                """,
+                (session_id, row["id"], index),
+            )
+
+    return {
+        "audit_id": session_id,
+        "items": [
+            {
+                "index": index,
+                **dict(row),
+            }
+            for index, row in enumerate(sampled_rows, start=1)
+        ],
+    }
+
+
+def apply_random_audit_revisions(
+    db: sqlite3.Connection,
+    audit_id: str,
+    revisions: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    session_row = db.execute(
+        "SELECT id FROM audit_sessions WHERE id = ?",
+        (audit_id,),
+    ).fetchone()
+    if session_row is None:
+        raise KeyError(f"Audit session not found: {audit_id}")
+    if not revisions:
+        return []
+
+    allowed_rows = db.execute(
+        "SELECT item_id FROM audit_session_items WHERE session_id = ?",
+        (audit_id,),
+    ).fetchall()
+    allowed_ids = {row["item_id"] for row in allowed_rows}
+    target_ids = [revision["id"] for revision in revisions]
+    invalid_ids = [item_id for item_id in target_ids if item_id not in allowed_ids]
+    if invalid_ids:
+        raise ValueError(
+            "Revision target(s) not part of this audit session: "
+            + ", ".join(invalid_ids)
+        )
+
+    updated: list[dict[str, Any]] = []
+    with db:
+        for revision in revisions:
+            fields: dict[str, Any] = {}
+            if "pattern" in revision:
+                fields["pattern"] = revision["pattern"]
+            if "guidance" in revision:
+                fields["guidance"] = revision["guidance"]
+            if not fields:
+                continue
+            update_item(db, revision["id"], _commit=False, **fields)
+            item = get_item(db, revision["id"])
+            updated.append({
+                "id": item["id"],
+                "pattern": item["pattern"],
+                "guidance": item["guidance"],
+            })
+    return updated
+
+
+def resolve_audit_session_index(
+    db: sqlite3.Connection,
+    audit_id: str,
+    index: int,
+) -> str:
+    row = db.execute(
+        """
+        SELECT item_id
+        FROM audit_session_items
+        WHERE session_id = ? AND sequence = ?
+        """,
+        (audit_id, index),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"Audit session item not found: {audit_id} index {index}")
+    return row["item_id"]

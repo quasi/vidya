@@ -3,14 +3,17 @@
 import pytest
 
 from vidya.store import (
+    apply_random_audit_revisions,
     archive_item,
     create_candidate,
     create_feedback,
     create_item,
+    create_random_audit_session,
     create_step,
     create_task,
     end_task,
     get_item,
+    resolve_audit_session_index,
     promote_candidate,
     update_item,
 )
@@ -258,6 +261,121 @@ def test_update_item_rejects_invalid_column(db):
     )
     with pytest.raises(ValueError, match="non-writable"):
         update_item(db, item_id, id="injected")
+
+
+def test_create_random_audit_session_returns_ten_active_items(db):
+    for i in range(12):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+    session = create_random_audit_session(db, project="vidya")
+    assert "audit_id" in session
+    assert len(session["items"]) == 10
+    item_ids = {item["id"] for item in session["items"]}
+    stored_ids = {
+        row["item_id"]
+        for row in db.execute(
+            "SELECT item_id FROM audit_session_items WHERE session_id = ?",
+            (session["audit_id"],),
+        ).fetchall()
+    }
+    assert stored_ids == item_ids
+    assert {item["index"] for item in session["items"]} == set(range(1, 11))
+
+
+def test_create_random_audit_session_requires_ten_items(db):
+    for i in range(9):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+        )
+    with pytest.raises(ValueError, match="Need at least 10 active items"):
+        create_random_audit_session(db)
+
+
+def test_apply_random_audit_revisions_updates_selected_items_only(db):
+    for i in range(10):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+    untouched_id = create_item(
+        db,
+        pattern="pattern untouched",
+        guidance="guidance untouched",
+        item_type="convention",
+        project="vidya",
+    )
+    session = create_random_audit_session(db, project="vidya")
+    target = session["items"][0]
+    original_untouched = get_item(db, untouched_id)
+
+    updated = apply_random_audit_revisions(
+        db,
+        audit_id=session["audit_id"],
+        revisions=[{
+            "id": target["id"],
+            "pattern": "revised pattern",
+            "guidance": "revised guidance",
+        }],
+    )
+
+    assert updated[0]["pattern"] == "revised pattern"
+    assert updated[0]["guidance"] == "revised guidance"
+    revised = get_item(db, target["id"])
+    assert revised["pattern"] == "revised pattern"
+    assert revised["guidance"] == "revised guidance"
+    untouched = get_item(db, untouched_id)
+    assert untouched["pattern"] == original_untouched["pattern"]
+    assert untouched["guidance"] == original_untouched["guidance"]
+
+
+def test_apply_random_audit_revisions_rejects_non_session_item(db):
+    for i in range(11):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+    session = create_random_audit_session(db, project="vidya")
+    outside_item = next(
+        row["id"]
+        for row in db.execute(
+            "SELECT id FROM knowledge_items WHERE project = 'vidya'"
+        ).fetchall()
+        if row["id"] not in {item["id"] for item in session["items"]}
+    )
+
+    with pytest.raises(ValueError, match="not part of this audit session"):
+        apply_random_audit_revisions(
+            db,
+            audit_id=session["audit_id"],
+            revisions=[{"id": outside_item, "guidance": "invalid change"}],
+        )
+
+
+def test_resolve_audit_session_index_returns_item_id(db):
+    for i in range(10):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+        )
+    session = create_random_audit_session(db)
+    first_item = next(item for item in session["items"] if item["index"] == 1)
+    assert resolve_audit_session_index(db, session["audit_id"], 1) == first_item["id"]
 
 
 def test_end_task_raises_on_missing_id(db):

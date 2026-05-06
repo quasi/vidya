@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — query Vidya and inject compact task-relevant knowledge."""
+"""Codex UserPromptSubmit hook — query Vidya and inject task-relevant knowledge."""
 
 import json
 import os
 import re
 import subprocess
 import sys
+from datetime import datetime
 from typing import Optional
 
+LOG_PATH = "/Users/quasi/.codex/hooks/vidya-hooks.log"
 _ACK_PHRASES = {
     "ok",
     "okay",
@@ -46,6 +48,14 @@ def detect_language(cwd: str) -> Optional[str]:
     if "package.json" in files:
         return "typescript"
     return None
+
+
+def log_line(message: str) -> None:
+    try:
+        with open(LOG_PATH, "a") as handle:
+            handle.write(f"{datetime.utcnow().isoformat()}Z UserPromptSubmit {message}\n")
+    except Exception:
+        pass
 
 
 def normalize_prompt(prompt: str) -> str:
@@ -89,15 +99,18 @@ def main() -> None:
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        log_line("invalid-json")
         sys.exit(0)
 
     prompt = data.get("prompt", "").strip()
     cwd = data.get("cwd", "")
     if len(prompt) < 20 or prompt.startswith("/") or is_low_signal_prompt(prompt):
+        log_line(f"skip-low-signal prompt_len={len(prompt)}")
         sys.exit(0)
 
     language = detect_language(cwd)
     project = detect_project(cwd)
+    log_line(f"start prompt_len={len(prompt)} language={language!r} project={project!r}")
 
     cmd = ["vidya", "--json", "query", "--context", prompt[:400], "--min-confidence", "0.3"]
     if language:
@@ -110,26 +123,34 @@ def main() -> None:
         output = proc.stdout.strip()
         payload = json.loads(output) if output else {}
     except Exception:
+        log_line("vidya-query-exception")
         sys.exit(0)
 
     items = payload.get("items", [])
     if not items:
+        log_line("skip-no-results")
         sys.exit(0)
 
     preferred_items = [item for item in items if is_preferred_item(item, project)]
     if not preferred_items:
+        log_line("skip-no-preferred-results")
         sys.exit(0)
 
-    response = {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(
-                ["[Vidya knowledge for this task]"]
-                + [summarize_item(item) for item in preferred_items[:3]]
-            ),
-        }
-    }
-    print(json.dumps(response))
+    lines = ["[Vidya knowledge for this task]"]
+    for item in preferred_items[:3]:
+        lines.append(summarize_item(item))
+
+    log_line(f"emit count={min(len(preferred_items), 3)}")
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": "\n".join(lines),
+                }
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

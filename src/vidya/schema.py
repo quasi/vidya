@@ -213,6 +213,27 @@ CREATE TABLE IF NOT EXISTS evolution_candidates (
     status TEXT DEFAULT 'pending',  -- pending, promoted, rejected
     review_notes TEXT
 );
+
+CREATE TABLE IF NOT EXISTS audit_sessions (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    language TEXT,
+    runtime TEXT,
+    framework TEXT,
+    project TEXT,
+    sample_size INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_session_items (
+    session_id TEXT NOT NULL REFERENCES audit_sessions(id) ON DELETE CASCADE,
+    item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    PRIMARY KEY (session_id, item_id),
+    UNIQUE (session_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_session_items_session
+    ON audit_session_items(session_id, sequence);
 """
 
 

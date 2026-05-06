@@ -11,7 +11,8 @@ from vidya.schema import init_db
 from vidya.query import cascade_query
 from vidya.store import (
     create_feedback, create_task, end_task, create_step, get_item, get_task,
-    _VALID_ACTION_TYPES,
+    _VALID_ACTION_TYPES, create_random_audit_session, apply_random_audit_revisions,
+    resolve_audit_session_index,
 )
 from vidya.learn import extract_from_feedback
 from vidya.maintain import compute_stats, health_report, auto_archive_stale
@@ -542,6 +543,129 @@ def audit(ctx, language, runtime, framework, project):
             click.echo(f"  {i}. {r}")
     else:
         click.echo("  none — knowledge base is healthy")
+
+
+@main.command("random-audit")
+@click.option("--language", default=None)
+@click.option("--runtime", default=None)
+@click.option("--framework", default=None)
+@click.option("--project", default=None)
+@click.pass_context
+def random_audit(ctx, language, runtime, framework, project):
+    """Sample 10 active learning items for spot audit."""
+    db = _db()
+    session = create_random_audit_session(
+        db,
+        sample_size=10,
+        language=language,
+        runtime=runtime,
+        framework=framework,
+        project=project,
+    )
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(session))
+        return
+
+    click.echo(f"Audit: {session['audit_id']}")
+    for item in session["items"]:
+        scope = item["project"] or item["framework"] or item["runtime"] or item["language"] or "global"
+        click.echo(f"\n{item['index']}. [{item['type']}] [{scope}] {item['id']}")
+        click.echo(f"   Pattern:  {item['pattern']}")
+        click.echo(f"   Guidance: {item['guidance']}")
+
+
+@main.command("random-audit-apply")
+@click.option("--audit-id", required=True)
+@click.option(
+    "--pattern",
+    "pattern_updates",
+    multiple=True,
+    help='Pattern update in the form "index:text".',
+)
+@click.option(
+    "--guidance",
+    "guidance_updates",
+    multiple=True,
+    help='Guidance update in the form "index:text".',
+)
+@click.option(
+    "--revision",
+    "revision_payloads",
+    multiple=True,
+    help='JSON object with "id" and optional "pattern"/"guidance" fields.',
+)
+@click.pass_context
+def random_audit_apply(ctx, audit_id, pattern_updates, guidance_updates, revision_payloads):
+    """Apply text revisions to items returned by a random audit session."""
+    db = _db()
+    if not pattern_updates and not guidance_updates and not revision_payloads:
+        raise click.UsageError(
+            'Provide at least one update via --pattern, --guidance, or --revision'
+        )
+
+    revisions_by_id = {}
+
+    def ensure_revision(item_id):
+        revision = revisions_by_id.get(item_id)
+        if revision is None:
+            revision = {"id": item_id}
+            revisions_by_id[item_id] = revision
+        return revision
+
+    def parse_indexed_update(payload, field_name):
+        if ":" not in payload:
+            raise click.UsageError(
+                f'Invalid --{field_name} value. Expected "index:text".'
+            )
+        raw_index, text = payload.split(":", 1)
+        try:
+            index = int(raw_index)
+        except ValueError as exc:
+            raise click.UsageError(
+                f'Invalid --{field_name} value. Index must be an integer.'
+            ) from exc
+        if index < 1:
+            raise click.UsageError(
+                f'Invalid --{field_name} value. Index must be >= 1.'
+            )
+        try:
+            item_id = resolve_audit_session_index(db, audit_id, index)
+        except KeyError as exc:
+            raise click.UsageError(
+                f'Invalid --{field_name} value. Audit item index {index} was not returned in this session.'
+            ) from exc
+        ensure_revision(item_id)[field_name] = text
+
+    for payload in pattern_updates:
+        parse_indexed_update(payload, "pattern")
+    for payload in guidance_updates:
+        parse_indexed_update(payload, "guidance")
+
+    for payload in revision_payloads:
+        try:
+            revision = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise click.UsageError(f"Invalid --revision JSON: {exc.msg}") from exc
+        if not isinstance(revision, dict):
+            raise click.UsageError("--revision must decode to a JSON object")
+        if "id" not in revision:
+            raise click.UsageError('--revision object must include an "id" field')
+        if "pattern" not in revision and "guidance" not in revision:
+            raise click.UsageError(
+                '--revision object must include at least one of "pattern" or "guidance"'
+            )
+        ensure_revision(revision["id"]).update(revision)
+
+    updated_items = apply_random_audit_revisions(
+        db,
+        audit_id=audit_id,
+        revisions=list(revisions_by_id.values()),
+    )
+    payload = {"audit_id": audit_id, "updated_items": updated_items}
+    if ctx.obj.get("json"):
+        click.echo(json.dumps(payload))
+        return
+    click.echo(f"Updated {len(updated_items)} item(s).")
 
 
 @main.command()

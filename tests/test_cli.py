@@ -6,7 +6,7 @@ from click.testing import CliRunner
 from datetime import datetime, timezone, timedelta
 
 from vidya.cli import main
-from vidya.store import create_item
+from vidya.store import create_item, get_item
 
 
 @pytest.fixture
@@ -262,6 +262,102 @@ def test_maintain_json_includes_health(cli, db):
     data = json.loads(result.output)
     assert "health" in data
     assert "_guidance" in data
+
+
+def test_random_audit_json_returns_ten_items(cli, db):
+    for i in range(10):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+
+    result = cli.invoke(main, ["--json", "random-audit", "--project", "vidya"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "audit_id" in data
+    assert len(data["items"]) == 10
+    assert {item["index"] for item in data["items"]} == set(range(1, 11))
+
+
+def test_random_audit_apply_json_updates_selected_items(cli, db):
+    for i in range(10):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+
+    session_result = cli.invoke(main, ["--json", "random-audit", "--project", "vidya"])
+    session = json.loads(session_result.output)
+    target = session["items"][0]
+    result = cli.invoke(
+        main,
+        [
+            "--json",
+            "random-audit-apply",
+            "--audit-id",
+            session["audit_id"],
+            "--pattern",
+            f"{target['index']}:updated pattern",
+            "--guidance",
+            f"{target['index']}:updated guidance",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["updated_items"][0]["id"] == target["id"]
+    item = get_item(db, target["id"])
+    assert item["pattern"] == "updated pattern"
+    assert item["guidance"] == "updated guidance"
+
+
+def test_random_audit_apply_allows_legacy_json_revision(cli, db):
+    for i in range(10):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+
+    session_result = cli.invoke(main, ["--json", "random-audit", "--project", "vidya"])
+    session = json.loads(session_result.output)
+    target_id = session["items"][0]["id"]
+
+    revision = json.dumps({"id": target_id, "guidance": "legacy json update"})
+    result = cli.invoke(
+        main,
+        ["--json", "random-audit-apply", "--audit-id", session["audit_id"], "--revision", revision],
+    )
+    assert result.exit_code == 0, result.output
+    item = get_item(db, target_id)
+    assert item["guidance"] == "legacy json update"
+
+
+def test_random_audit_apply_rejects_invalid_index(cli, db):
+    for i in range(10):
+        create_item(
+            db,
+            pattern=f"pattern {i}",
+            guidance=f"guidance {i}",
+            item_type="convention",
+            project="vidya",
+        )
+
+    session_result = cli.invoke(main, ["--json", "random-audit", "--project", "vidya"])
+    session = json.loads(session_result.output)
+
+    result = cli.invoke(
+        main,
+        ["random-audit-apply", "--audit-id", session["audit_id"], "--guidance", "11:invalid"],
+    )
+    assert result.exit_code != 0
 
 
 def test_maintain_archive_flag_dry_run_by_default(cli, db):
